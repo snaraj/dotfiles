@@ -82,6 +82,10 @@ packer.startup(function(use)
     -- vim-fugitive: adds :G or :git on command
     use 'tpope/vim-fugitive'
 
+    -- vim-markdown: supports folds and generating table of contents
+    use 'preservim/vim-markdown'
+    use 'iamcco/markdown-preview.nvim'
+
     if install_plugins then
         require('packer').sync()
     end
