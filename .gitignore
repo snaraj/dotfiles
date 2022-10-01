@@ -1,3 +1,9 @@
 .DS_Store
+
 expressvpn
+
+gh/hosts.yml
+
 zsh/plugins
+zsh/.zcompdump	
+zsh/.zsh_history
