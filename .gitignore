@@ -1,4 +1,3 @@
 .DS_Store
-.zcompdump
-.zsh_history
-/zsh/plugins
+expressvpn
+zsh/plugins
