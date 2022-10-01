@@ -1,3 +1,2 @@
 # Dotfiles
-
-![Macbook Rice](image docs/rice,png "Macbook Rice")
+![Macbook Pro](docs/rice.png "Macbook Pro")
