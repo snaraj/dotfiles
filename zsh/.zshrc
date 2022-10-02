@@ -1,6 +1,3 @@
-# brew home /opt/homebrew/Cellar/
-eval "$(starship init zsh)"
-
 # Auto Completition
 autoload -Uz compinit && compinit
 zstyle ':completion:*' matcher-list 'm:{a-z}={A-Aa-z}'
@@ -30,3 +27,6 @@ alias du='dust'
 alias vim='nvim'
 
 alias ..='cd ..'
+
+# starship init
+eval "$(starship init zsh)"
