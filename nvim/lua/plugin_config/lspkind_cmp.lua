@@ -47,7 +47,7 @@ cmp.setup({
             -- The function below will be called before any actual modifications from lspkind:
             before = function(entry, vim_item)
                 local menu_icon = {
-                    nvim_lsp = 'λ ',
+                    nvim_lsp = '⇴',
                     luasnip = '⋗ ',
                     buffer = 'Ω ',
                     path = '🖫 ',

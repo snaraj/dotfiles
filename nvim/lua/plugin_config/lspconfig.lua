@@ -103,6 +103,7 @@ nvim_lsp.gopls.setup {
 
 -- -- Go lang imports ordered on save, like goimports does.
 function go_org_imports(wait_ms)
+    on_attach = on_attach
     local params = vim.lsp.util.make_range_params()
     params.context = {only = {"source.organizeImports"}}
     local result = vim.lsp.buf_request_sync(0, "textDocument/codeAction", params, wait_ms)
@@ -143,6 +144,29 @@ local rt = {
     }
 }
 require('rust-tools').setup(rt)
+
+-- Rust Analyzer
+nvim_lsp.rust_analyzer.setup({
+    on_attach=on_attach,
+    settings = {
+        ["rust-analyzer"] = {
+            imports = {
+                granularity = {
+                    group = "module",
+                },
+                prefix = "self",
+            },
+            cargo = {
+                buildScripts = {
+                    enable = true,
+                },
+            },
+            procMacro = {
+                enable = true
+            },
+        }
+    }
+})
 
 -- Python
 nvim_lsp.pylsp.setup{

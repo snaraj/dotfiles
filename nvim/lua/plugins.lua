@@ -86,6 +86,12 @@ packer.startup(function(use)
     use 'preservim/vim-markdown'
     use 'iamcco/markdown-preview.nvim'
 
+    -- Cargo Power Access with Terminal Access
+    use 'voldikss/vim-floaterm'
+
+    -- lspsaga, plugin for lsp
+    use 'glepnir/lspsaga.nvim'
+
     if install_plugins then
         require('packer').sync()
     end
