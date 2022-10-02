@@ -4,7 +4,8 @@ add_newline = false
 success_symbol = "[➜](bold green) "
 
 [lua]
-format = "via [🌙 $version](bold blue) "
+format = "via [🌙 $version]($style) "
+style = "bold blue"
 
 [rust]
 format = "via [🦀 $version](bold red) "
