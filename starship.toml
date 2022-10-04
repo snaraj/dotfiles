@@ -1,21 +1,25 @@
 add_newline = false
 
 [character]
-success_symbol = "[➜](bold green) "
+success_symbol = "[🗡️](bold green)"
+error_symbol = "[☠️](bold red)"
 
 [lua]
-format = "via [🌙 $version]($style) "
+format = "via [$symbol $version]($style) "
+symbol = "🌙" 
 style = "bold blue"
 
 [rust]
-format = "via [🦀 $version](bold red) "
+format = "via [$symbol $version]($style) "
+symbol = "🦀"
+style = "bold red"
 
 [git_branch]
-format = "on [$symbol$branch(:$remote_branch)]($style) "
-symbol = "🌴 "
+format = "on [$symbol $branch(:$remote_branch)]($style) "
+symbol = "🌴"
 
 [package]
-format = "is [$symbol$version]($style) " 
-symbol = "📦 "
+format = "is [$symbol $version]($style) " 
+symbol = "📦"
 style = "bold 208"
 disabled = true
