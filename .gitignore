@@ -7,3 +7,5 @@ gh/hosts.yml
 zsh/plugins
 zsh/.zcompdump
 zsh/.zsh_history
+zsh/.zsh_session/
+

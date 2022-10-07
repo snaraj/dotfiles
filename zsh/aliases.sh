@@ -17,3 +17,6 @@ alias vim='nvim'
 ##########################################
 
 alias ..='cd ..'
+
+# Python
+alias py='python3'
