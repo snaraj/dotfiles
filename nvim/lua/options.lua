@@ -1,6 +1,6 @@
 -- [[ Options to customize experience. Functionally + Aesthetics ]]
 local opt = vim.opt
-local cmd = vim.api.nvim_command
+--local cmd = vim.api.nvim_command
 
 -- [[ Context ]] 
 opt.number = true                -- bool: Show line numbers
@@ -13,6 +13,8 @@ opt.relativenumber = true
 opt.encoding = 'utf8'            -- str:  String encoding to use
 opt.fileencoding = 'utf8'        -- str:  File encoding to use
 opt.clipboard:append {'unnamedplus'}  -- enable clipboard macos
+vim.o.background = "dark"
+vim.cmd([[colorscheme gruvbox]])
 
 -- [[ Theme ]]
 opt.syntax = "ON"                -- str:  Allow syntax highlighting

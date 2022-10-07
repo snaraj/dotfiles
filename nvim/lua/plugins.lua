@@ -27,6 +27,9 @@ packer.startup(function(use)
     use 'williamboman/mason-lspconfig.nvim'
     use 'neovim/nvim-lspconfig'
 
+    -- file icons
+    use 'kyazdani42/nvim-web-devicons'
+
     -- Rust Tools
     use 'simrat39/rust-tools.nvim'
 
@@ -35,7 +38,7 @@ packer.startup(function(use)
     use 'navarasu/onedark.nvim'
     use 'tanvirtin/monokai.nvim'
     use 'folke/tokyonight.nvim'
-
+    use 'ellisonleao/gruvbox.nvim'
     -- Completion framework:
     use 'hrsh7th/nvim-cmp'
 
