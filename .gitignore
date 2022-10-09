@@ -4,8 +4,9 @@ expressvpn
 
 gh/hosts.yml
 
+raycast/extensions/
+
 zsh/plugins
 zsh/.zcompdump
 zsh/.zsh_history
 zsh/.zsh_session/
-
