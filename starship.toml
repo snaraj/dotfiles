@@ -1,4 +1,5 @@
 add_newline = false
+format = "$all"
 
 [character]
 success_symbol = " [🗡️](bold green)"
@@ -15,8 +16,16 @@ symbol = "🦀"
 style = "bold red"
 
 [git_branch]
-format = "on [$symbol $branch(:$remote_branch)]($style) "
-symbol = "🌴"
+format = "[$symbol $branch]($style) "
+symbol = ""
+
+[git_metrics]
+disabled = true
+
+[git_status]
+ahead = "⇡${count}"
+diverged = "⇕⇡${ahead_count}⇣${behind_count}"
+behind = "⇣${count}"
 
 [package]
 format = "is [$symbol $version]($style) " 

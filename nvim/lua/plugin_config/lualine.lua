@@ -3,10 +3,12 @@ if not lualine_status then
     return
 end
 
+local gruvbox = require'lualine.themes.gruvbox_dark'
+
 lualine.setup {
     options = {
         icons_enabled = true,
-        theme = 'auto',
+        theme = gruvbox,
         section_separators = '',
     }
 }
