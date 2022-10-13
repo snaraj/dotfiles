@@ -4,9 +4,11 @@ expressvpn
 
 gh/hosts.yml
 
-raycast/
+raycast
+
+kitty/kitty-gruvbox-theme
 
 zsh/plugins
 zsh/.zcompdump
 zsh/.zsh_history
-zsh/.zsh_session/
+zsh/.zsh_sessions/*
