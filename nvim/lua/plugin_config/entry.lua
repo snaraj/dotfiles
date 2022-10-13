@@ -1,3 +1,4 @@
+-- Load Plugins
 require('mason').setup()
 require('mason-lspconfig').setup()
 require('plugin_config.lualine')
@@ -11,7 +12,11 @@ require('plugin_config.markdown_preview')
 require('plugin_config.vim_floaterm')
 require('plugin_config.lspsaga')
 require('plugin_config.nvim_web_devicons')
+require('plugin_config.null_ls')
 
 -- Themes
-require('plugin_config.gruvbox')
--- require('plugin_config.onedark')
+-- Currently Using:
+require('plugin_config.onedark')
+
+-- Configured Themes:
+-- require('plugin_config.gruvbox')
