@@ -10,7 +10,7 @@ format = "took [$duration]($style)"
 style = "bold-yellow"
 
 [kubernetes]
-format = 'on [⛵$cluster in $context \($namespace\)](dimmed green) '
+format = '[on ⛴️ $context in $namespace](blue) '
 disabled = false
 
 [lua]

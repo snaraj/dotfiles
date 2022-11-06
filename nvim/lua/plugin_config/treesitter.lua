@@ -27,6 +27,13 @@ treesitter.setup {
         "yaml",
         "css",
         "html",
-        "lua"
+        "lua",
+        "dockerfile",
+        "dot",
+        "d",
+        "gitignore",
+        "gomod",
+        "graphql",
+        "json5",
     },
 }

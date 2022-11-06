@@ -1,6 +1,4 @@
-##########################################
 # Utility Aliases 
-##########################################
 
 alias ls='exa --color=always --icons --group-directories-first'
 alias la='exa -a --color=always --icons --group-directories-first'  # all files and dirs
@@ -11,13 +9,8 @@ alias cat='bat'
 alias du='dust'
 alias vim='nvim'
 
-
-##########################################
 # Nagivation 
-##########################################
-
 alias ..='cd ..'
-alias c='clear'
 
 # Python
 alias py='python3'
@@ -26,6 +19,6 @@ alias py='python3'
 alias k='kubectl'
 alias kgp='kubectl get po'
 alias kdp='kubectl describe po'
+alias kx='f() { [ "$1" ] && kubectl config use-context $1 || kubectl config current-context ; } ; f'
+alias kn='f() { [ "$1" ] && kubectl config set-context --current --namespace $1 || kubectl config view --minify | grep namespace | cut -d" " -f6 ; } ; f'
 
-# lima, nerdctl
-#alias docker='lima nerdctl'
