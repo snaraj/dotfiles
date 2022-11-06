@@ -13,6 +13,7 @@ require('plugin_config.vim_floaterm')
 require('plugin_config.lspsaga')
 require('plugin_config.nvim_web_devicons')
 require('plugin_config.null_ls')
+require('plugin_config.nvim-tree')
 
 -- Themes
 -- Currently Using:

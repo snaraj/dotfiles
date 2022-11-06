@@ -39,6 +39,15 @@ packer.startup(function(use)
     use 'tanvirtin/monokai.nvim'
     use 'folke/tokyonight.nvim'
     use 'ellisonleao/gruvbox.nvim'
+
+    -- File Browser Column
+    use {
+        'nvim-tree/nvim-tree.lua',
+        requires = {
+            'nvim-tree/nvim-web-devicons', -- optional, for file icons
+        },
+    }
+
     -- Completion framework:
     use 'hrsh7th/nvim-cmp'
 
