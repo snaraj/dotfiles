@@ -5,7 +5,7 @@ end
 
 onedark.setup {
 
-    style = 'dark',
+    style = 'darker',
     transparent = true,
     term_colors = true,
     ending_tildes = false,
@@ -42,4 +42,5 @@ require('lualine').setup {
     }
 }
 
-require('onedark').load()
+onedark.load()
+vim.cmd("colorscheme onedark")

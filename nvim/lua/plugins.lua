@@ -99,7 +99,7 @@ packer.startup(function(use)
     -- prettierd
     use 'jose-elias-alvarez/null-ls.nvim'
     use 'MunifTanjim/prettier.nvim'
-    
+
     -- Automatically install plugins if fresh install
     if install_plugins then
         require('packer').sync()

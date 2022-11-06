@@ -3,6 +3,8 @@ if [ -e $ZDOTDIR/aliases.sh ]; then
     source $ZDOTDIR/aliases.sh
 fi
 
+
+# Variables
 if [ -e $ZDOTDIR/variables.sh ]; then
     source $ZDOTDIR/variables.sh
 fi
@@ -10,6 +12,10 @@ fi
 # Auto Completition
 autoload -Uz compinit && compinit
 zstyle ':completion:*' matcher-list 'm:{a-z}={A-Aa-z}'
+source <(helm completion zsh) 
+source <(limactl completion zsh); compdef _limactl limactl
+source <(kubectl completion zsh)
+source <(kind completion zsh)
 
 # Syntax Highlighting 
 source $ZDOTDIR/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh

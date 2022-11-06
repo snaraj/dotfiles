@@ -21,3 +21,11 @@ alias c='clear'
 
 # Python
 alias py='python3'
+
+# Kubernetes
+alias k='kubectl'
+alias kgp='kubectl get po'
+alias kdp='kubectl describe po'
+
+# lima, nerdctl
+#alias docker='lima nerdctl'

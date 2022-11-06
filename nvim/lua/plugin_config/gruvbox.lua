@@ -3,7 +3,7 @@ if not status_gruvbox then
     return
 end
 
-gruvbox.setup{
+gruvbox.setup {
     undercurl = true,
     underline = true,
     bold = true,
@@ -21,6 +21,5 @@ gruvbox.setup{
     transparent_mode = true,
 }
 
--- Configured also in options.lua
-
 vim.o.background = "dark"
+vim.cmd("colorscheme gruvbox")
