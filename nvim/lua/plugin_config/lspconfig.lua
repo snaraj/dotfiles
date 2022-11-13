@@ -175,4 +175,4 @@ nvim_lsp.pylsp.setup {
     on_attach = on_attach,
 }
 
-require 'lspconfig'.pyright.setup {}
+require 'lspconfig'.pyright.setup{}

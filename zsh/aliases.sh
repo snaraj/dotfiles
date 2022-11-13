@@ -5,7 +5,6 @@ alias la='exa -a --color=always --icons --group-directories-first'  # all files 
 alias ll='exa -l --color=always --icons --group-directories-first'  # long format
 alias lt='exa -aT --color=always --icons --group-directories-first' # tree listing
 alias df='duf'
-alias cat='bat'
 alias du='dust'
 alias vim='nvim'
 
