@@ -5,7 +5,7 @@ end
 
 onedark.setup {
 
-    style = 'dark',
+    style = 'darker',
     transparent = true,
     term_colors = true,
     ending_tildes = false,

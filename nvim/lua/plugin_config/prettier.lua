@@ -2,8 +2,8 @@ local status, prettier = pcall(require, 'prettier')
 if not status then
     return
 end
-  
-prettier.setup{
+
+prettier.setup {
     bin = 'prettierd',
     filetypes = {
         'lua',

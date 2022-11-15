@@ -7,6 +7,7 @@ alias lt='exa -aT --color=always --icons --group-directories-first' # tree listi
 alias df='duf'
 alias du='dust'
 alias vim='nvim'
+alias grep='grep --color=auto'
 
 # Nagivation 
 alias ..='cd ..'

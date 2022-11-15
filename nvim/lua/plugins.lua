@@ -39,6 +39,7 @@ packer.startup(function(use)
     use 'tanvirtin/monokai.nvim'
     use 'folke/tokyonight.nvim'
     use 'ellisonleao/gruvbox.nvim'
+    use 'shaunsingh/nord.nvim'
 
     -- File Browser Column
     use {
