@@ -6,8 +6,6 @@ gh/hosts.yml
 
 raycast
 
-kitty/kitty-gruvbox-theme
-
 zsh/plugins
 zsh/.zcompdump
 zsh/.zsh_history

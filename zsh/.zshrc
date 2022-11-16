@@ -1,3 +1,6 @@
+# Banner
+echo "$(cat $ZDOTDIR/logos/sword-snake-smallquote.txt)"| lolcat
+
 # Alias
 if [ -e $ZDOTDIR/aliases.sh ]; then
     source $ZDOTDIR/aliases.sh
