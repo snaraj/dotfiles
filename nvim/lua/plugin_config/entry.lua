@@ -16,8 +16,7 @@ require('plugin_config.null_ls')
 require('plugin_config.nvim-tree')
 
 -- Themes
--- Currently Using:
 --require('plugin_config.dracula')
---require('plugin_config.onedark')
+require('plugin_config.onedark')
 --require('plugin_config.gruvbox')
-require('plugin_config.nord')
+--require('plugin_config.nord')

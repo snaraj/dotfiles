@@ -10,7 +10,9 @@ format = "took [$duration]($style)"
 style = "bold-yellow"
 
 [kubernetes]
-format = '[on ⛴️ $context in $namespace](blue) '
+format = '[$symbol$cluster in $namespace]($style) '
+style = "#3dcafc"
+symbol = '⛴️'
 disabled = false
 
 [lua]
