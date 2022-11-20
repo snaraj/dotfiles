@@ -8,7 +8,7 @@ catppuccin.setup {
     dim_inactive = {
         enabled = true,
         shade = "red",
-        percentage = 0.15,
+        percentage = 0.70,
     },
     integrations = {
         cmp = true,
@@ -18,9 +18,22 @@ catppuccin.setup {
         mini = false,
         lsp_saga = true,
         mason = true,
-        native_lsp = true,
         telescope = true,
-        -- For more plugins integrations please scroll down (https://github.com/catppuccin/nvim#integrations)
+        native_lsp = {
+            enabled = true,
+            virtual_text = {
+                errors = { "italic" },
+                hints = { "italic" },
+                warnings = { "italic" },
+                information = { "italic" },
+            },
+            underlines = {
+                errors = { "underline" },
+                hints = { "underline" },
+                warnings = { "underline" },
+                information = { "underline" },
+            },
+        },
     },
     styles = {
         comments = {},
@@ -59,9 +72,17 @@ catppuccin.setup {
     },
 }
 
+-- treesitter fix
+require("nvim-treesitter.configs").setup {
+    highlight = {
+        enable = true,
+        additional_vim_regex_highlighting = false
+    },
+}
+
 -- Bufferline
 require("bufferline").setup {
-      highlights = require("catppuccin.groups.integrations.bufferline").get()
+    highlights = require("catppuccin.groups.integrations.bufferline").get()
 }
 
 -- Lspsaga integration
@@ -72,24 +93,9 @@ require("lspsaga").init_lsp_saga {
 -- Lunaline integration
 require('lualine').setup {
     options = {
+        icons_enabled = true,
         theme = "catppuccin"
     }
 }
-
-native_lsp = {
-    enabled = true,
-    virtual_text = {
-        errors = { "italic" },
-        hints = { "italic" },
-        warnings = { "italic" },
-        information = { "italic" },
-    },
-    underlines = {
-        errors = { "underline" },
-        hints = { "underline" },
-        warnings = { "underline" },
-        information = { "underline" },
-    },
-},
 
 vim.cmd.colorscheme "catppuccin"
