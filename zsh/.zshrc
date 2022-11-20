@@ -1,5 +1,5 @@
 # Banner
-echo "$(cat $ZDOTDIR/logos/sword-snake-smallquote.txt)"| lolcat
+echo "$(cat $ZDOTDIR/logos/knight-dragon-rider.txt)"| lolcat
 
 # Alias
 if [ -e $ZDOTDIR/aliases.sh ]; then
