@@ -40,6 +40,7 @@ packer.startup(function(use)
     use 'folke/tokyonight.nvim'
     use 'ellisonleao/gruvbox.nvim'
     use 'shaunsingh/nord.nvim'
+    use { "catppuccin/nvim", as = "catppuccin" }
 
     -- File Browser Column
     use {

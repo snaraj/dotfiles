@@ -6,6 +6,8 @@ gh/hosts.yml
 
 raycast
 
+spotify-tui/*
+
 zsh/plugins
 zsh/.zcompdump
 zsh/.zsh_history
