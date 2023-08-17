@@ -1,0 +1,79 @@
+add_newline = false
+format = "$all"
+
+# Change prompt logo
+[character]
+#success_symbol = " [🗡️](bold green)"
+#error_symbol = " [☠️](bold red)"
+#success_symbol = "[➜](bold green) "
+#error_symbol = "[➜](bold red) "
+#success_symbol = "[⇝](bold green)"
+#error_symbol = "[⇝](bold red)"
+#success_symbol = "[»](bold green)"
+#error_symbol = "[»](bold red)"
+#success_symbol = "[➸](bold green)"
+#error_symbol = "[➸](bold red)"
+success_symbol = "[➫](bold green)"
+error_symbol = "[➫](bold red)"
+
+[cmd_duration]
+format = "took [$duration]($style)"
+style = "bold-yellow"
+
+[kubernetes]
+format = '[$namespace in $context]($style) '
+style = "#3dcafc"
+symbol = ""
+disabled = false
+[kubernetes.context_aliases]
+"arn:aws:eks:us-west-2:389177558658:cluster/pac-devops-virtualrack-cloud-eks-cluster-dev" = "eks-cluster-dev"
+
+[golang]
+format = "via [go $version]($style) "
+symbol = "🏎 💨"
+style = "blue"
+
+[lua]
+symbol = "🌙" 
+format = "[$symbol $version]($style) "
+style = "bold blue"
+
+[rust]
+format = "via [$symbol $version]($style) "
+symbol = "🦀"
+style = "bold red"
+
+[helm]
+format = "via [$symbol $version]($style) "
+symbol = "helm"
+style = "bold blue"
+
+[git_branch]
+symbol = ""
+format = "[$symbol $branch]($style) "
+style = "bright-purple"
+
+[git_metrics]
+disabled = true
+
+[git_status]
+ahead = "⇡${count}"
+diverged = "⇕⇡${ahead_count}⇣${behind_count}"
+behind = "⇣${count}"
+conflicted = "🏳"
+untracked = ""
+up_to_date = "✓"
+stashed = ""
+modified = ""
+staged = '[++\($count\)](green)'
+renamed = ""
+deleted = ""
+
+[package]
+format = "[$symbol $version]($style) " 
+symbol = "📦"
+style = "bold 208"
+disabled = true
+
+[docker_context]
+disabled = true

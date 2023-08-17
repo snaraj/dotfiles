@@ -1,0 +1,17 @@
+# ignore work related items
+zsh/pac-variables.zsh
+
+# ignore most of nvm
+nvm/alias
+nvm/versions
+
+#ignore pip config
+pip/*
+
+#ignore zsh metadata
+zsh/.zcompdump
+zsh/.zsh_history
+zsh/.zsh_sessions
+
+#ignore MAC
+.DS_store
