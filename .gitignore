@@ -12,6 +12,10 @@ pip/*
 zsh/.zcompdump
 zsh/.zsh_history
 zsh/.zsh_sessions
+zsh/plugings/*
 
 #ignore MAC
 .DS_store
+
+# ignore gitconfiguration
+git/*
