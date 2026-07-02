@@ -1,21 +1,28 @@
 # CONFIG ROOT DIR LOCATION
 export CONFIG_DIR=$HOME/.config
 
-# default text editor
-export EDITOR=hx
-
 # change default starship config location
 export STARSHIP_CONFIG=$CONFIG_DIR/starship/starship.toml
 
-# default wallpaper location
-export WALLPAPER_DIR=$CONFIG_DIR/wallpapers/
+# default wallpaper location (images used by the theme script)
+export WALLPAPER_DIR=$CONFIG_DIR/wallpapers/pc
 
 # default location for BAT configuration
 export BAT_CONFIG_PATH=$CONFIG_DIR/bat/bat.conf
 
-# change nvm default config location
-export NVM_DIR="$HOME/.config/nvm"
-[ -s "/opt/homebrew/opt/nvm/nvm.sh" ] && \. "/opt/homebrew/opt/nvm/nvm.sh"
-[ -s "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm" ] && \. "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm"
+# Firefox CSS config file
+export FIREFOX_USER_CHROME="/Users/samuel/Library/Application\ Support/Firefox/Profiles/wldjcvt7.default-release-1/chrome"
 
-eval "$(/opt/homebrew/bin/brew shellenv)"
+# kitty reads this env var to locate its config directory
+export KITTY_CONFIG_DIRECTORY=$CONFIG_DIR/kitty
+
+# scripts directory (theme command and others)
+export SCRIPTS_DIR=$CONFIG_DIR/scripts
+
+# pywal output cache (used by theme.sh for colors-kitty.conf)
+export WAL_CACHE=$HOME/.cache/wal
+
+# zsh history — keep alongside other zsh files, bump size from default 500
+export HISTFILE=$CONFIG_DIR/zsh/.zsh_history
+export HISTSIZE=10000
+export SAVEHIST=10000

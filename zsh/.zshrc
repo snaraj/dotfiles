@@ -1,5 +1,5 @@
 # Banner
-echo "$(cat $ZDOTDIR/logos/dragon-1.txt)"
+# echo "$(cat $ZDOTDIR/logos/anime-girl-tongue-out-small.txt)" | lolcat
 
 # Alias
 if [ -e $ZDOTDIR/aliases.zsh ]; then
@@ -36,6 +36,9 @@ source $ZDOTDIR/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # enable GPG Git Sign
 export GPG_TTY=$(tty)
+
+# pipx-installed tools (pywal) and the theme command
+export PATH="$HOME/.local/bin:$PATH"
 
 # starship init
 eval "$(starship init zsh)"

@@ -7,7 +7,8 @@ alias kn='kubectl config set-context --current --namespace'
 
 alias vim='nvim'
 
-alias ls='exa --color=always --group-directories-first'
-alias la='exa -a --color=always --group-directories-first'
-alias ll='exa -l --color=always --icons --group-directories-first'
-alias lt='exa -aT --color=always --icons --group-directories-first'
+# Turn exa off since its currently depracated
+alias ls='eza --color=always --icons=always'
+alias la='eza -a --color=always --icons=always'
+alias ll='eza -l --color=always --icons=always'
+alias lt='eza -aT --color=always --icons=always'
