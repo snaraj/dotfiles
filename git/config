@@ -1,0 +1,17 @@
+[user]
+	name = Samuel Naranjo
+	email = 39077795+snaraj@users.noreply.github.com
+[core]
+	editor = nvim
+[init]
+	defaultBranch = main
+
+# Commit signing stays OUT of this file by design: agent lanes sign per
+# command (env-pinned identity + `git -c gpg.format=ssh -c user.signingkey=…`),
+# so a global signing config would hide identity decisions from review.
+[credential "https://github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential

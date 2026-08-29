@@ -3,8 +3,8 @@ format = "$all"
 
 # Change prompt logo
 [character]
-#success_symbol = " [🗡️](bold green)"
-#error_symbol = " [☠️](bold red)"
+success_symbol = "[🗡️](bold green)"
+error_symbol = "[☠️](bold red)"
 #success_symbol = "[➜](bold green) "
 #error_symbol = "[➜](bold red) "
 #success_symbol = "[⇝](bold green)"
@@ -13,8 +13,8 @@ format = "$all"
 #error_symbol = "[»](bold red)"
 #success_symbol = "[➸](bold green)"
 #error_symbol = "[➸](bold red)"
-success_symbol = "[➫](bold green)"
-error_symbol = "[➫](bold red)"
+#success_symbol = "[➫](bold green)"
+#error_symbol = "[➫](bold red)"
 
 [cmd_duration]
 format = "took [$duration]($style)"
