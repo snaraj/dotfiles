@@ -21,5 +21,5 @@ export WAL_CACHE=$HOME/.cache/wal
 
 # zsh history — keep alongside other zsh files, bump size from default 500
 export HISTFILE=$CONFIG_DIR/zsh/.zsh_history
-export HISTSIZE=10000
-export SAVEHIST=10000
+export HISTSIZE=100000
+export SAVEHIST=100000
