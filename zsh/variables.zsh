@@ -7,11 +7,8 @@ export STARSHIP_CONFIG=$CONFIG_DIR/starship/starship.toml
 # default wallpaper location (images used by the theme script)
 export WALLPAPER_DIR=$CONFIG_DIR/wallpapers/pc
 
-# default location for BAT configuration
-export BAT_CONFIG_PATH=$CONFIG_DIR/bat/bat.conf
-
 # Firefox CSS config file
-export FIREFOX_USER_CHROME="/Users/samuel/Library/Application\ Support/Firefox/Profiles/wldjcvt7.default-release-1/chrome"
+export FIREFOX_USER_CHROME="/Users/samuel/Library/Application Support/Firefox/Profiles/wldjcvt7.default-release-1/chrome"
 
 # kitty reads this env var to locate its config directory
 export KITTY_CONFIG_DIRECTORY=$CONFIG_DIR/kitty

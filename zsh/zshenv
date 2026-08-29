@@ -1,0 +1,15 @@
+# ENTRY POINT FOR ZSH, LEAVE AT ~
+# where all environmental variables should live.
+export EDITOR=nvim
+# currently using .config/zsh/.zshrc file instead of ~/.zshrc
+export ZDOTDIR=$HOME/.config/zsh
+# brew environment, inlined — was `eval "$(brew shellenv)"`, a subprocess on
+# EVERY zsh (scripts included); these values are static on this machine
+export HOMEBREW_PREFIX="/opt/homebrew"
+export HOMEBREW_CELLAR="/opt/homebrew/Cellar"
+export HOMEBREW_REPOSITORY="/opt/homebrew"
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+fpath[1,0]="/opt/homebrew/share/zsh/site-functions"
+export FPATH
+export INFOPATH="/opt/homebrew/share/info:${INFOPATH:-}"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
