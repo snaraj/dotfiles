@@ -8,7 +8,9 @@ zsh/pac-variables.zsh
 zsh/.zcompdump*
 zsh/.zsh_history
 zsh/.zsh_sessions
-zsh/plugins/*
+# the whole directory, not just its contents: each plugin is its own clone,
+# so `zsh/plugins/*` still left the embedded repo re-addable as a gitlink
+zsh/plugins/
 zsh/completions/
 zsh/.starship-init.zsh
 

@@ -23,9 +23,9 @@ gitignored.
 - `config` — identity (public noreply), nvim editor, gh credential helper
 - signing stays per-command by design; no keys here
 
-**`wallpapers/` + `wal/` + `scripts/`**
-- wallpaper library, pywal templates, and the `theme` CLI (wallpaper +
-  matching terminal colors, Unsplash/Pinterest fetch) — full docs in
+**`wallpapers/` + `scripts/`**
+- wallpaper library and the `theme` CLI (wallpaper + matching terminal
+  colors, Unsplash/Pinterest fetch) — full docs in
   [`scripts/README.md`](scripts/README.md)
 
 ## Install — fresh macOS
