@@ -97,7 +97,24 @@ save_wallpaper() {
 
 # --- applying --------------------------------------------------------------
 
-reload_kitty() { pkill -USR1 -x kitty 2>/dev/null; return 0; }
+# Recolor every RUNNING kitty instance. $1 = the colors file just activated.
+# Remote control (kitty.conf: allow_remote_control socket-only + listen_on
+# unix:/tmp/kitty-samuel) is the reliable path — a running instance ignores
+# SIGUSR1 on this machine, and its windows (old and new) keep the in-memory
+# palette forever. set-colors --configured also updates the instance's stored
+# config, so windows opened later inherit the new palette too. SIGUSR1 stays
+# as a fallback for instances started before the socket config existed.
+reload_kitty() {
+    local sock applied=0
+    for sock in /tmp/kitty-samuel-*; do
+        [ -S "$sock" ] || continue
+        if kitten @ --to "unix:$sock" set-colors --all --configured "$1" 2>/dev/null; then
+            applied=1
+        fi
+    done
+    [ "$applied" = 1 ] || pkill -USR1 -x kitty 2>/dev/null
+    return 0
+}
 
 set_desktop() {
     dry && { note "[no-apply] would set the desktop wallpaper to $1"; return 0; }
@@ -122,7 +139,7 @@ set_palette() {
     [ -f "$WAL_CACHE/colors-kitty.conf" ] ||
         die "pywal wrote no kitty colors in $WAL_CACHE — point WAL_CACHE at pywal's own cache dir"
     printf 'include %s/colors-kitty.conf\n' "$WAL_CACHE" >"$CURRENT" || die "cannot write $CURRENT"
-    reload_kitty
+    reload_kitty "$WAL_CACHE/colors-kitty.conf"
     return 0
 }
 
@@ -311,7 +328,7 @@ static)
         note "[no-apply] would select static theme '$name'"
     else
         printf 'include %s\n' "$file" >"$CURRENT" || die "cannot write $CURRENT"
-        reload_kitty
+        reload_kitty "$file"
     fi
     note "static theme '$name'"
     ;;

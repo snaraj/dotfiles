@@ -156,9 +156,16 @@ Implementation notes worth knowing:
                      or     ~/.config/kitty/themes/<name>.conf  ← static mode
 ```
 
-`theme` only ever rewrites the one-line `current-theme.conf`, then sends
-`SIGUSR1` to running kitty processes — kitty re-reads `kitty.conf` and all its
-includes in place, so colors change live with no restart and no new window.
+`theme` only ever rewrites the one-line `current-theme.conf`, then pushes the
+new colors to every running kitty instance over its remote-control socket
+(`kitty.conf` sets `allow_remote_control socket-only` and
+`listen_on unix:/tmp/kitty-samuel`). `kitten @ set-colors --all --configured`
+recolors existing windows *and* updates the instance's stored config, so
+windows opened later inherit the new palette too — no restart, no new window.
+A running instance ignores `SIGUSR1` on macOS, so the signal survives only as
+a fallback for instances started before the socket config existed; after
+pulling this config, quit and reopen kitty once so the instance carries the
+socket.
 
 `kitten themes` (built into kitty) writes the same `current-theme.conf`, so the
 two coexist; `theme status` will report whatever is currently included.
@@ -217,7 +224,7 @@ Required:
 
 Optional: `sips` (macOS, preinstalled) gives exact image dimensions; without it
 `file` is used, which is slightly less reliable on exotic formats. `kitty` need
-not be running — the reload is a best-effort signal.
+not be running — the reload is best-effort.
 
 ### Fresh machine
 
@@ -264,6 +271,6 @@ matrix here, and macOS is the supported target.
 | `warning: only NNNpx wide` | The source really is that small. It was still saved and applied. |
 | `pywal not installed` | `pipx install pywal`, then reopen the shell so `~/.local/bin/wal` is on `PATH`. |
 | `pywal wrote no kitty colors in ...` | `WAL_CACHE` and pywal's actual cache disagree. Unset `WAL_CACHE` or point it at `~/.cache/wal`. |
-| Colors don't change | kitty was not running when the signal was sent, or `kitty.conf` no longer has `include current-theme.conf`. `theme status` shows what is included. |
+| Colors don't change | The kitty instance predates the socket config — quit and reopen kitty once — or `kitty.conf` no longer has `include current-theme.conf`. `theme status` shows what is included. |
 | Desktop doesn't change but colors do | `wallpaper` is not installed (`brew install wallpaper`) or the platform is unsupported. |
 | Two files with `-2` suffixes | Two different images wanted the same slug. Both were kept on purpose; delete whichever you don't want. |
