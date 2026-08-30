@@ -51,6 +51,44 @@ rotate_image() {
 # Apply the global --rotate flag, if given, to a file about to be saved.
 maybe_rotate() { [ -n "$ROTATE" ] && rotate_image "$1" "$ROTATE"; return 0; }
 
+# The primary display's aspect ratio (width/height, 3 decimals). Finder's
+# desktop bounds are logical points, but the RATIO matches the pixels.
+screen_aspect() {
+    local b w h
+    b=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null)
+    w=$(printf '%s' "$b" | awk -F', ' '{print $3}')
+    h=$(printf '%s' "$b" | awk -F', ' '{print $4}')
+    if [ -n "$w" ] && [ -n "$h" ] && [ "$h" -gt 0 ] 2>/dev/null; then
+        awk -v w="$w" -v h="$h" 'BEGIN {printf "%.3f", w/h}'
+    else
+        printf '1.600'
+    fi
+}
+
+# Extend $1's canvas to the screen's aspect ratio, design centred, padding in
+# solid color $2 (RRGGBB) — for art on a flat background: no crop, no zoom,
+# the surround just grows in the same color. sips pads natively.
+extend_image() {
+    local w h aspect tw th
+    w=$(sips -g pixelWidth "$1" 2>/dev/null | awk '/pixelWidth/ {print $2}')
+    h=$(sips -g pixelHeight "$1" 2>/dev/null | awk '/pixelHeight/ {print $2}')
+    [ -n "$w" ] && [ -n "$h" ] || die "cannot read image size of $1"
+    aspect=$(screen_aspect)
+    tw=$(awk -v h="$h" -v a="$aspect" 'BEGIN {printf "%d", h*a}')
+    if [ "$tw" -ge "$w" ]; then
+        th="$h"
+    else
+        tw="$w"
+        th=$(awk -v w="$w" -v a="$aspect" 'BEGIN {printf "%d", w/a}')
+    fi
+    command -v sips >/dev/null 2>&1 || die "canvas extension needs sips (macOS)"
+    sips --padToHeightWidth "$th" "$tw" --padColor "$2" "$1" >/dev/null 2>&1 ||
+        die "canvas extension failed on $1"
+    return 0
+}
+
+maybe_extend() { [ -n "$EXTEND" ] && extend_image "$1" "$EXTEND"; return 0; }
+
 # "3840x2160", or empty when the dimensions cannot be read.
 img_size() {
     if command -v sips >/dev/null 2>&1; then
@@ -202,15 +240,16 @@ cmd_local() { # $1 = image argument, or empty for a random pick
         img=$(random_local)
         [ -n "$img" ] || die "no images found in $WALLPAPER_DIR"
     fi
-    if [ -n "$ROTATE" ]; then
-        # Never rotate the library file itself — save the turned copy as its
-        # own wallpaper so both orientations stay available.
+    if [ -n "$ROTATE" ] || [ -n "$EXTEND" ]; then
+        # Never modify the library file itself — save the transformed copy as
+        # its own wallpaper so the original stays available.
         tmp=$(mktemp -t theme) || die "mktemp failed"
         trap 'rm -f "$tmp"' EXIT
         cp "$img" "$tmp" || die "cannot copy $img"
-        rotate_image "$tmp" "$ROTATE"
+        maybe_rotate "$tmp"
+        maybe_extend "$tmp"
         mime=$(file -b --mime-type "$tmp")
-        save_wallpaper "$tmp" "$mime" "$(basename "${img%.*}") rotated $ROTATE"
+        save_wallpaper "$tmp" "$mime" "$(basename "${img%.*}")${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
         img="$SAVED"
     fi
     use_image "$img"
@@ -278,7 +317,8 @@ cmd_unsplash() {
     # a wallpaper you can find again, not a slug with an id tail. The
     # photographer is credited in the terminal note, not the filename.
     maybe_rotate "$tmp"
-    save_wallpaper "$tmp" "$mime" "${1:+$1 }$slug${ROTATE:+ rotated $ROTATE}"
+    maybe_extend "$tmp"
+    save_wallpaper "$tmp" "$mime" "${1:+$1 }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     # Unsplash API guideline: report the download so the photographer is credited.
     [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
         curl -fs --max-time 15 -K - -o /dev/null "$dl" 2>/dev/null
@@ -338,7 +378,8 @@ cmd_url() {
     *) die "that URL is $mime, not an image" ;;
     esac
     maybe_rotate "$tmp"
-    save_wallpaper "$tmp" "$mime" "$hint${ROTATE:+ rotated $ROTATE}"
+    maybe_extend "$tmp"
+    save_wallpaper "$tmp" "$mime" "$hint${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     use_image "$SAVED"
 }
 
@@ -392,6 +433,9 @@ theme — wallpaper + terminal palette
   --rotate left|right    turn the image 90° first (any image command) — portrait
                          pins become landscape; desktop is set in fill mode
                          (crop to cover, never letterbox bars)
+  --extend[=RRGGBB]      centre the design and grow the canvas to the screen's
+                         shape in a solid color (default 000000) — for art on a
+                         flat background: no crop, no zoom, no visible seams
 
 static themes: $(static_themes | paste -sd' ' -)
 docs: $CONFIG_DIR/scripts/README.md
@@ -467,6 +511,7 @@ EOF
 # portrait Pinterest pin becomes a landscape that fills the desktop. Parsed out
 # here (any position) so the subcommands stay flag-free.
 ROTATE=""
+EXTEND=""
 _args=()
 _want=""
 for _a in "$@"; do
@@ -474,12 +519,19 @@ for _a in "$@"; do
     case "$_a" in
     --rotate) _want=1 ;;
     --rotate=*) ROTATE="${_a#*=}" ;;
+    --extend) EXTEND="000000" ;;
+    --extend=*) EXTEND="${_a#*=}"; EXTEND="${EXTEND#\#}" ;;
     *) _args+=("$_a") ;;
     esac
 done
 [ -z "$_want" ] || die "--rotate takes left or right"
 set -- "${_args[@]}"
 case "$ROTATE" in '' | left | right) ;; *) die "--rotate takes left or right" ;; esac
+case "$EXTEND" in
+'' ) ;;
+[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+*) die "--extend takes a 6-digit hex color (default 000000)" ;;
+esac
 
 # `theme <cmd> --help` means help for THAT command, never an argument — and no
 # subcommand takes other flags, so any remaining leading dash is a mistake.

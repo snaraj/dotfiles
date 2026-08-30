@@ -34,6 +34,7 @@ theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
 theme … --rotate left|right   # any image command: turn 90° before applying
+theme … --extend[=RRGGBB]     # pad flat-background art to screen shape (default 000000)
 theme list               # local wallpapers and static themes
 theme status             # current mode, wallpaper, palette source
 ```
