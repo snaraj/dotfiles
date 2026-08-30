@@ -33,6 +33,24 @@ slugify() {
 
 hash_of() { { shasum -a 256 || sha256sum; } <"$1" 2>/dev/null | cut -d' ' -f1; }
 
+# Rotate $1 in place 90° ($2 = left|right). sips ships with macOS; imagemagick
+# is the Linux fallback. Lets portrait images (Pinterest pins) fill a desktop.
+rotate_image() {
+    local deg
+    case "$2" in right) deg=90 ;; left) deg=270 ;; *) die "--rotate takes left or right" ;; esac
+    if command -v sips >/dev/null 2>&1; then
+        sips --rotate "$deg" "$1" >/dev/null 2>&1 || die "rotation failed on $1"
+    elif command -v magick >/dev/null 2>&1; then
+        magick "$1" -rotate "$deg" "$1" || die "rotation failed on $1"
+    else
+        die "no rotation tool found (need sips or imagemagick)"
+    fi
+    return 0
+}
+
+# Apply the global --rotate flag, if given, to a file about to be saved.
+maybe_rotate() { [ -n "$ROTATE" ] && rotate_image "$1" "$ROTATE"; return 0; }
+
 # "3840x2160", or empty when the dimensions cannot be read.
 img_size() {
     if command -v sips >/dev/null 2>&1; then
@@ -126,7 +144,10 @@ reload_kitty() {
 set_desktop() {
     dry && { note "[no-apply] would set the desktop wallpaper to $1"; return 0; }
     if command -v wallpaper >/dev/null 2>&1; then
-        wallpaper set "$1" || die "wallpaper set failed for $1"
+        # fill = cover the screen and crop the overflow: maximum zoom that
+        # still fills every pixel, never letterbox bars.
+        wallpaper set "$1" --scale fill 2>/dev/null ||
+            wallpaper set "$1" || die "wallpaper set failed for $1"
     elif [ -n "${XDG_CURRENT_DESKTOP:-}" ] && command -v gsettings >/dev/null 2>&1; then
         gsettings set org.gnome.desktop.background picture-uri "file://$1"
         gsettings set org.gnome.desktop.background picture-uri-dark "file://$1"
@@ -174,12 +195,23 @@ random_local() {
 }
 
 cmd_local() { # $1 = image argument, or empty for a random pick
-    local img
+    local img tmp mime
     if [ -n "$1" ]; then
         img=$(resolve_local "$1") || die "no such wallpaper '$1' (looked in $WALLPAPER_DIR)"
     else
         img=$(random_local)
         [ -n "$img" ] || die "no images found in $WALLPAPER_DIR"
+    fi
+    if [ -n "$ROTATE" ]; then
+        # Never rotate the library file itself — save the turned copy as its
+        # own wallpaper so both orientations stay available.
+        tmp=$(mktemp -t theme) || die "mktemp failed"
+        trap 'rm -f "$tmp"' EXIT
+        cp "$img" "$tmp" || die "cannot copy $img"
+        rotate_image "$tmp" "$ROTATE"
+        mime=$(file -b --mime-type "$tmp")
+        save_wallpaper "$tmp" "$mime" "$(basename "${img%.*}") rotated $ROTATE"
+        img="$SAVED"
     fi
     use_image "$img"
 }
@@ -245,7 +277,8 @@ cmd_unsplash() {
     # Name = your search prompt (when given) + the photo's own description —
     # a wallpaper you can find again, not a slug with an id tail. The
     # photographer is credited in the terminal note, not the filename.
-    save_wallpaper "$tmp" "$mime" "${1:+$1 }$slug"
+    maybe_rotate "$tmp"
+    save_wallpaper "$tmp" "$mime" "${1:+$1 }$slug${ROTATE:+ rotated $ROTATE}"
     # Unsplash API guideline: report the download so the photographer is credited.
     [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
         curl -fs --max-time 15 -K - -o /dev/null "$dl" 2>/dev/null
@@ -258,9 +291,37 @@ cmd_url() {
     [ -n "$link" ] || die "usage: theme url <image-url | pinterest-pin-url>"
     tmp=$(mktemp -t theme) || die "mktemp failed"
     trap 'rm -f "$tmp"' EXIT
-    fetch_img "$link" "$tmp" || die "download failed: $link"
+    # A direct i.pinimg.com /NNNx/ link is a Pinterest downscale; the same path
+    # under /originals/ is the full-resolution upload when it exists. Sharpness
+    # first: try originals, fall back to the given link.
+    # fetch_best <url> <dest>: like fetch_img, but a pinimg /NNNx/ downscale is
+    # first tried at /originals/ — sets FETCHED to the URL that actually served.
+    fetch_best() {
+        local orig=""
+        FETCHED="$1"
+        case "$1" in
+        *://i.pinimg.com/*x/*)
+            orig=$(printf '%s' "$1" | sed -E 's#(//i\.pinimg\.com)/[0-9]+x/#\1/originals/#')
+            ;;
+        esac
+        if [ -n "$orig" ] && [ "$orig" != "$1" ] && fetch_img "$orig" "$2"; then
+            note "upgraded the pinimg downscale to /originals/"
+            FETCHED="$orig"
+            return 0
+        fi
+        fetch_img "$1" "$2"
+    }
+    fetch_best "$link" "$tmp" || die "download failed: $link"
+    link="$FETCHED"
     mime=$(file -b --mime-type "$tmp")
+    # Name hint without its extension (save_wallpaper strips from the LAST dot,
+    # which would otherwise eat any suffix appended after ".jpg"). A bare CDN
+    # hash is not a name — date-stamp those; a pin PAGE link gives a real title.
     hint=$(name_hint "$link")
+    hint="${hint%.*}"
+    if printf '%s' "$hint" | grep -qE '^[0-9a-f]{16,}$'; then
+        hint="pinterest-$(date +%Y%m%d-%H%M%S)"
+    fi
     case "$mime" in
     image/*) ;;
     text/html | application/xhtml*)
@@ -276,7 +337,8 @@ cmd_url() {
         ;;
     *) die "that URL is $mime, not an image" ;;
     esac
-    save_wallpaper "$tmp" "$mime" "$hint"
+    maybe_rotate "$tmp"
+    save_wallpaper "$tmp" "$mime" "$hint${ROTATE:+ rotated $ROTATE}"
     use_image "$SAVED"
 }
 
@@ -322,9 +384,14 @@ theme — wallpaper + terminal palette
   theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
                          (multi-word queries work bare: theme unsplash neon city rain)
   theme url <link>       direct image URL or Pinterest pin: download, save, apply
+                         (pinimg /NNNx/ downscales auto-upgrade to /originals/)
   theme list             local wallpapers and static themes
   theme status           current mode, wallpaper, and palette source
   theme help             this text
+
+  --rotate left|right    turn the image 90° first (any image command) — portrait
+                         pins become landscape; desktop is set in fill mode
+                         (crop to cover, never letterbox bars)
 
 static themes: $(static_themes | paste -sd' ' -)
 docs: $CONFIG_DIR/scripts/README.md
@@ -371,10 +438,15 @@ theme unsplash [query…]
 EOF
         ;;
     url) cat <<EOF
-theme url <link>
+theme url <link> [--rotate left|right]
 
   Download an image from a direct URL or a Pinterest pin page, save it
   into $WALLPAPER_DIR, then apply it (desktop + pywal + kitty).
+
+  Sharpness: direct i.pinimg.com /NNNx/ downscales are auto-upgraded to
+  the full-resolution /originals/ variant when it exists, and the desktop
+  is set in fill mode (crop to cover — never letterbox bars).
+  --rotate turns a portrait pin 90° into a landscape before applying.
 EOF
         ;;
     list) printf 'theme list\n\n  List local wallpapers and static kitty themes.\n' ;;
@@ -391,8 +463,26 @@ EOF
 
 # --- dispatch --------------------------------------------------------------
 
+# --rotate left|right turns the image 90° before it is saved and applied, so a
+# portrait Pinterest pin becomes a landscape that fills the desktop. Parsed out
+# here (any position) so the subcommands stay flag-free.
+ROTATE=""
+_args=()
+_want=""
+for _a in "$@"; do
+    if [ -n "$_want" ]; then ROTATE="$_a"; _want=""; continue; fi
+    case "$_a" in
+    --rotate) _want=1 ;;
+    --rotate=*) ROTATE="${_a#*=}" ;;
+    *) _args+=("$_a") ;;
+    esac
+done
+[ -z "$_want" ] || die "--rotate takes left or right"
+set -- "${_args[@]}"
+case "$ROTATE" in '' | left | right) ;; *) die "--rotate takes left or right" ;; esac
+
 # `theme <cmd> --help` means help for THAT command, never an argument — and no
-# subcommand takes flags, so any other leading dash is a mistake to refuse.
+# subcommand takes other flags, so any remaining leading dash is a mistake.
 case "${2:-}" in
 -h | --help) usage_cmd "${1:-}"; exit 0 ;;
 -*) usage >&2; die "unknown option '${2}' for 'theme ${1}'" ;;

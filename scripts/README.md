@@ -33,6 +33,7 @@ theme static <name>      # any file in ~/.config/kitty/themes/<name>.conf
 theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
+theme … --rotate left|right   # any image command: turn 90° before applying
 theme list               # local wallpapers and static themes
 theme status             # current mode, wallpaper, palette source
 ```
@@ -96,11 +97,18 @@ checks before anything is applied:
    but says so.
 
 Pinterest specifically: pin pages expose only a `736x`-wide preview in their
-`og:image`. `theme` rewrites `i.pinimg.com/736x/...` to
+`og:image`. `theme` rewrites any `i.pinimg.com/<width>x/...` downscale —
+whether it came from a pin page or was pasted directly — to
 `i.pinimg.com/originals/...` to get the uploaded original, and falls back to
-the preview URL if the originals path is not there. Pins whose source upload
+the given URL if the originals path is not there. Pins whose source upload
 was small stay small — that is Pinterest's copy, not a bug here, and the width
 warning will tell you.
+
+Portrait pins: add `--rotate left|right` (any position, any image command) to
+turn the image 90° before it is saved and applied. Rotating a local-library
+image saves the turned copy as its own wallpaper — the original file is never
+modified. The desktop is always set in fill mode: crop to cover the screen,
+never letterbox bars.
 
 ### Unsplash setup (free)
 
