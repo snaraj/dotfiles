@@ -522,13 +522,27 @@ wall_source() { # $1 file
 # line. A wallpaper never applied has no cached scheme: the caller renders an
 # honest dash rather than computing one at list time.
 wall_scheme() { # $1 file
-    local m s
+    local m s newest=""
     m=$(printf '%s' "$1" | tr '/.' '__')
-    # shellcheck disable=SC2012  # the mangled name is [A-Za-z0-9_] only; ls -t
-    # picks the newest cached scheme (latest backend), which find cannot order.
-    s=$(ls -t "$WAL_CACHE/schemes/${m}"_*.json 2>/dev/null | head -1)
-    [ -n "$s" ] || return 1
-    tr ',' '\n' <"$s" | sed -n 's/.*"color[0-9]": *"#\([0-9a-fA-F]*\)".*/\1/p' | head -8
+    # The cached name is <mangled-path>_<light|dark>_<backend>_…json. Matching
+    # the mode token too is not decoration: a bare `${m}_*` also matches the
+    # cache of ANY wallpaper whose mangled name EXTENDS this one (`sky.jpg`
+    # would match `sky_jpg_x.png`'s entry), and a newer neighbour would then
+    # render as this row's scheme. Globbing in the shell — not `ls -t | head`
+    # — because that pipeline reads a filename it cannot quote and needs a
+    # ShellCheck exemption to say so; `-nt` picks the newest (latest backend)
+    # with no assumption about the characters in the name at all.
+    for s in "$WAL_CACHE/schemes/${m}"_dark_*.json "$WAL_CACHE/schemes/${m}"_light_*.json; do
+        [ -f "$s" ] || continue
+        if [ -z "$newest" ] || [ "$s" -nt "$newest" ]; then newest="$s"; fi
+    done
+    [ -n "$newest" ] || return 1
+    # Exactly six hex digits, so a truncated or corrupt cache entry is simply
+    # not a color here rather than an arithmetic error inside the caller's
+    # 16#-conversion. "color1" cannot swallow "color10": the digit is followed
+    # by the closing quote.
+    tr ',' '\n' <"$newest" |
+        sed -n 's/.*"color[0-9]": *"#\([0-9a-fA-F]\{6\}\)".*/\1/p' | head -8
 }
 
 # Wallpapers as a table, LATEST ADDED first (APFS birth time): truncated

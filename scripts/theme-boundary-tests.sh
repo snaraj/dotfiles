@@ -18,7 +18,11 @@
 #     (the exact-host allowlist), and a photo description carrying tab and
 #     newline — the field-shift exploit — still reports to the photo's OWN
 #     download endpoint exactly once and nowhere else (the NUL transport),
-#     an assertion no key-absence check can satisfy for it.
+#     an assertion no key-absence check can satisfy for it;
+#   - `theme list`'s colorscheme column reports the palette cache and never
+#     guesses: it cannot borrow a name-extending neighbour's cached scheme,
+#     an unapplied wallpaper renders a dash rather than invented colors, and
+#     a corrupt cache entry degrades to that same dash with a silent stderr.
 # Runs entirely in a throwaway directory; exits 0 on pass.
 set -u
 THEME="$(cd "$(dirname "$0")" && pwd)/theme.sh"
@@ -203,6 +207,56 @@ if grep '^KEYTO ' "$evildllog" | grep -qv '^KEYTO https://api\.unsplash\.com/'; 
     fail "key followed a non-api download_location"
 else pass "non-api download_location never receives the key"; fi
 unset STUB_DL
+
+# --- `theme list` colorscheme column: reports the cache, never guesses ------
+# The column claims "the scheme THIS wallpaper derived". Three ways that claim
+# can quietly become false, each pinned: borrowing a neighbour's cache entry,
+# inventing colors for a wallpaper that was never applied, and mangling a
+# corrupt entry into an arithmetic error instead of a dash.
+walcache="$fixture/wal"
+mkdir -p "$walcache/schemes"
+mangle() { printf '%s' "$1" | tr '/.' '__'; }
+# A minimal pywal scheme file. color0 is the caller-chosen probe; color10 must
+# never be read as color1, and color8/color9 must fall outside the first eight.
+scheme_json() { # $1 destination, $2 color0 hex
+    printf '{"checksum":"x","colors":{"color0":"#%s","color1":"#111111","color2":"#222222","color3":"#333333","color4":"#444444","color5":"#555555","color6":"#666666","color7":"#777777","color8":"#888888","color10":"#aaaaaa"}}\n' \
+        "$2" >"$1"
+}
+printf 'x' >"$lib/scheme-hit.jpg"
+printf 'x' >"$lib/scheme-hit_jpg_x.png"
+printf 'x' >"$lib/scheme-miss.jpg"
+printf 'x' >"$lib/scheme-bad.jpg"
+scheme_json "$walcache/schemes/$(mangle "$lib/scheme-hit.jpg")_dark_colorz_None_1_2.0.0.json" 010203
+# The neighbour's mangled name EXTENDS scheme-hit's, and is deliberately the
+# NEWER file: a `${mangled}_*` glob picks it, and scheme-hit's row would render
+# a scheme it never derived. `touch -t` instead of a sleep keeps this exact.
+scheme_json "$walcache/schemes/$(mangle "$lib/scheme-hit_jpg_x.png")_dark_colorz_None_1_2.0.0.json" 0a0b0c
+# Truncated hex in every slot: under a `[0-9a-fA-F]*` capture these all match,
+# and the caller's `$((16#${c:4:2}))` then evaluates `16#` — a bash arithmetic
+# error per color, on stderr, in the middle of a table.
+printf '{"colors":{"color0":"#0102","color1":"#3","color2":"#","color3":"#12345"}}\n' \
+    >"$walcache/schemes/$(mangle "$lib/scheme-bad.jpg")_dark_colorz_None_1_2.0.0.json"
+touch -t 202001010000 "$walcache/schemes/$(mangle "$lib/scheme-hit.jpg")"_dark_*.json
+touch -t 202601010000 "$walcache/schemes/$(mangle "$lib/scheme-hit_jpg_x.png")"_dark_*.json
+
+listout="$fixture/list.out"; listerr="$fixture/list.err"
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_list() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    bash "$THEME" list >"$listout" 2>"$listerr"; }
+check  "list renders"                          0 run_list
+hitrow=$(grep '^  scheme-hit ' "$listout")
+if printf '%s' "$hitrow" | grep -q '48;2;1;2;3m'; then
+    pass "list shows the scheme a wallpaper derived"
+else fail "list did not render scheme-hit's own cached color0"; fi
+if printf '%s' "$hitrow" | grep -q '48;2;10;11;12m'; then
+    fail "list borrowed a name-extending neighbour's cached scheme"
+else pass "list never borrows a neighbour's cached scheme"; fi
+if grep '^  scheme-miss ' "$listout" | grep -q '48;2;'; then
+    fail "an unapplied wallpaper was given invented colors"
+else pass "unapplied wallpaper lists an honest dash"; fi
+if grep '^  scheme-bad ' "$listout" | grep -q '48;2;' || [ -s "$listerr" ]; then
+    fail "a corrupt cache entry produced a swatch or an error"
+else pass "corrupt cache entry degrades to a dash, silently"; fi
 
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "$fails FAILURES"; fi
 exit "$fails"
