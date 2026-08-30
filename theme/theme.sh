@@ -236,6 +236,20 @@ use_image() {
 
 # --- local wallpapers ------------------------------------------------------
 
+# A title copied from `theme list` may be TRUNCATED (trailing … or cut
+# mid-word). Resolve it anyway when it is the prefix of exactly ONE library
+# file; zero or several matches fail — never a guess between candidates.
+prefix_match() { # $1 name-or-prefix
+    local p="${1%…}" f hit="" n=0
+    p="${p%...}"
+    [ -n "$p" ] || return 1
+    for f in "$WALLPAPER_DIR/$p"*; do
+        [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
+    done
+    [ "$n" -eq 1 ] || return 1
+    printf '%s' "$hit"
+}
+
 resolve_local() {
     local f
     [ -f "$1" ] && { printf '%s' "$1"; return 0; }
@@ -243,6 +257,7 @@ resolve_local() {
     for f in "$WALLPAPER_DIR/$1".*; do
         [ -f "$f" ] && { printf '%s' "$f"; return 0; }
     done
+    f=$(prefix_match "$1") && { printf '%s' "$f"; return 0; }
     return 1
 }
 
@@ -254,7 +269,7 @@ random_local() {
 cmd_local() { # $1 = image argument, or empty for a random pick
     local img mime
     if [ -n "$1" ]; then
-        img=$(resolve_local "$1") || die "no such wallpaper '$1' (looked in $WALLPAPER_DIR)"
+        img=$(resolve_local "$1") || die "no wallpaper uniquely matching '$1' (looked in $WALLPAPER_DIR; a truncated name from theme list works when only one wallpaper starts with it)"
     else
         img=$(random_local)
         [ -n "$img" ] || die "no images found in $WALLPAPER_DIR"
@@ -545,20 +560,59 @@ wall_scheme() { # $1 file
         sed -n 's/.*"color[0-9]": *"#\([0-9a-fA-F]\{6\}\)".*/\1/p' | head -8
 }
 
+# A tiny inline picture preview for `list -v`, via kitty's graphics protocol
+# in unicode-placeholder mode: icat transmits a downscaled image and emits
+# placeholder cells that flow with text. icat's own output positions
+# absolutely (meant for preview panes), so we strip the cursor choreography
+# and re-emit just the transmission plus each line of cells, re-applying the
+# image-id color per line. Sets PV_APC (transmit once), PV1/PV2 (one line of
+# cells each, color-wrapped), PV_W (cell width). kitty-only by its nature.
+PREVIEW_COLS=7
+wall_preview() { # $1 file
+    [ -n "${KITTY_WINDOW_ID:-}" ] || return 1
+    command -v kitten >/dev/null 2>&1 || return 1
+    local out rest color rows w pad
+    out=$(kitten icat --unicode-placeholder --transfer-mode=file --stdin=no \
+        --use-window-size 100,50,2000,1000 \
+        --place="${PREVIEW_COLS}x2@0x0" "$1" 2>/dev/null) || return 1
+    case "$out" in *$'\e\\'*) ;; *) return 1 ;; esac
+    PV_APC="${out%%$'\e\\'*}"$'\e\\'
+    PV_APC="${PV_APC#$'\r'}"
+    rest="${out#*$'\e\\'}"
+    color=$(printf '%s' "$rest" | grep -o $'\e\[38[:;][0-9:;]*m' | head -1)
+    rows=$(printf '%s' "$rest" | sed $'s/\e7//g; s/\e8//g; s/\e\[[0-9;]*H//g; s/\r//g; s/\e\[[0-9]*C//g; s/\e\[39m//g; s/\e\[38[:;][0-9:;]*m//g')
+    PV1=$(printf '%s' "$rows" | sed -n 1p)
+    PV2=$(printf '%s' "$rows" | sed -n 2p)
+    [ -n "$PV1" ] || return 1
+    w=$(printf '%s' "$PV_APC" | sed -n 's/.*[,;]c=\([0-9]*\).*/\1/p')
+    case "$w" in '' | *[!0-9]*) w=$PREVIEW_COLS ;; esac
+    pad=$((PREVIEW_COLS - w))
+    [ "$pad" -gt 0 ] && {
+        PV1="$PV1$(printf '%*s' "$pad" '')"
+        PV2="${PV2}$(printf '%*s' "$pad" '')"
+    }
+    PV1="${color}${PV1}"$'\e[39m'
+    PV2="${color}${PV2}"$'\e[39m'
+    return 0
+}
+
 # Wallpapers as a table, LATEST ADDED first (APFS birth time): truncated
 # title plus a small render of the scheme that wallpaper derives — snappy,
 # because the scheme comes from pywal's cache, not the image. Source (an
-# xattr/mdls read per file), format, size, and date all live behind -v, so
-# the default listing does no per-file metadata work and stays instant.
+# xattr/mdls read per file), format, size, date, and the inline picture
+# preview all live behind -v, so the default listing does no per-file
+# metadata work and stays instant.
 cmd_list() {
     local cols namew f name src fmt bytes added c r g b n
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
-    if [ -n "$VERBOSE" ]; then namew=$((cols - 71)); else namew=$((cols - 32)); fi
+    local pvok=""
+    [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && pvok=1
+    if [ -n "$VERBOSE" ]; then namew=$((cols - 71 - ${pvok:+9})); namew=$((namew)); else namew=$((cols - 32)); fi
     [ "$namew" -gt 44 ] && namew=44
     [ "$namew" -lt 16 ] && namew=16
-    printf 'wallpapers (%s), latest first:\n\n' "$WALLPAPER_DIR"
+    printf 'wallpapers\n\n'
     if [ -n "$VERBOSE" ]; then
-        printf '  %-*s  %-24s  %-10s  %-6s  %-7s  %s\n' "$namew" TITLE COLORSCHEME SOURCE FORMAT SIZE ADDED
+        printf '  %s%-*s  %-24s  %-10s  %-6s  %-7s  %s\n' "${pvok:+$(printf '%-9s' PICTURE)}" "$namew" TITLE COLORSCHEME SOURCE FORMAT SIZE ADDED
     else
         printf '  %-*s  %s\n' "$namew" TITLE COLORSCHEME
     fi
@@ -570,6 +624,13 @@ cmd_list() {
             name=$(basename "$f")
             name="${name%.*}"
             [ "${#name}" -gt "$namew" ] && name="$(printf '%.*s' $((namew - 1)) "$name")…"
+            PV_APC=""; PV1=""; PV2=""
+            if [ -n "$pvok" ] && wall_preview "$f"; then
+                printf '%s' "$PV_APC"
+                printf '  %s' "$PV1"
+            elif [ -n "$pvok" ]; then
+                printf '  %-7s' ''
+            fi
             printf '  %-*s  ' "$namew" "$name"
             # 8 swatches of 2 cells + a trailing space = exactly 24 columns of
             # visible width, so the -v columns after stay aligned; a wallpaper
@@ -591,6 +652,8 @@ cmd_list() {
                 printf '  %-10s  %-6s  %-7s  %s' "$src" "$fmt" "$bytes" "$added"
             fi
             printf '\n'
+            # Second line of the picture preview, when one rendered.
+            if [ -n "$PV2" ]; then printf '  %s\n' "$PV2"; fi
         done
 }
 
@@ -674,6 +737,9 @@ resolve_library() {
             [ -f "$f" ] && { cand="$f"; break; }
         done
     fi
+    # Truncated copy-paste from `theme list`: unique prefix only, and the
+    # canonical containment check below still applies to whatever it found.
+    [ -n "$cand" ] || cand=$(prefix_match "$1") || return 1
     [ -n "$cand" ] || return 1
     dirreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) || return 1
     real=$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P) || return 1
@@ -870,10 +936,14 @@ theme list [-v]
   (truncated to the terminal) and a small render of the colorscheme
   that wallpaper derived when it was last applied (from the palette
   cache — a wallpaper never applied shows "-", nothing is computed at
-  list time, so the listing stays instant). -v adds source — the site
-  it came from (unsplash, pinterest, reddit, …), recorded at download
+  list time, so the listing stays instant). -v adds a small picture
+  preview (kitty graphics; in kitty only) plus source — the site it
+  came from (unsplash, pinterest, reddit, …), recorded at download
   time or read from macOS download metadata, "-" when unknown —
-  plus format, size, and date added.
+  format, size, and date added.
+
+  A truncated title copied from the table (with or without the …)
+  works in set/rename/rm when only one wallpaper starts with it.
 
   Examples:
     theme list
