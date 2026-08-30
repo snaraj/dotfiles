@@ -330,7 +330,7 @@ cmd_url() {
         page_img=$(printf '%s\n' "$meta" | sed -n 1p)
         page_title=$(printf '%s\n' "$meta" | sed -n 2p)
         [ -n "$page_img" ] || die "no og:image on that page — pass a direct image URL instead"
-        fetch_img "$page_img" "$tmp" || die "download failed: $page_img"
+        fetch_best "$page_img" "$tmp" || die "download failed: $page_img"
         mime=$(file -b --mime-type "$tmp")
         case "$mime" in image/*) ;; *) die "resolved link is $mime, not an image" ;; esac
         hint="${page_title:-$(name_hint "$page_img")}"
