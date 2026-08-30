@@ -575,6 +575,75 @@ if grep -q 'sweep-safe' "$sweep_all"; then
     pass "printable filename text survives every command"
 else fail "sanitizing removed the whole name, not just its control bytes"; fi
 
+# --- VALID HELP PATHS are output too, and they print ENVIRONMENT data ------
+# The sweep above drives COMMANDS. A valid `theme <cmd> --help` takes a
+# different path entirely: usage_cmd's heredocs and usage()'s live header
+# printf directly, so neither passes through note()/die(). Round 12 found
+# WALLPAPER_DIR reaching five heredocs raw, and TERM_PROGRAM/TERM reaching the
+# header raw — environment and configuration data, all of it able to carry an
+# OSC 52 clipboard write. Enumerating those five is exactly how a sixth gets
+# missed, so this drives EVERY valid help path, and `help` itself, rather than
+# the ones the finding happened to name.
+helpcache="$fixture/helpcache"
+mkdir -p "$helpcache"
+printf '#!/bin/bash\nexit 1\n' >"$sweepbin/wallpaper"
+# uname/sw_vers are resolved through PATH, so usage()'s os line is not ours to
+# trust either. This stub makes `uname -s` differ from Darwin, which routes
+# usage() into its `uname -srm` branch and puts the payload in the os value.
+cat >"$sweepbin/uname" <<STUB
+#!/bin/bash
+printf '%s' "LinuxSAFE$oscpay"
+STUB
+chmod +x "$sweepbin/uname"
+help_bad=""
+help_all="$fixture/help.out"; : >"$help_all"
+help_run() { # $1 label, $2 TERM_PROGRAM, $3 TERM, $4… theme arguments
+    local o
+    o=$(WALLPAPER_DIR="/nonexistent/hlibSAFE$oscpay" WAL_CACHE="$helpcache" \
+        CONFIG_DIR="$helpcache" KITTY_CONFIG_DIRECTORY="$helpcache" COLUMNS=120 \
+        THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' \
+        PATH="$sweepbin:$PATH" TERM_PROGRAM="$2" TERM="$3" \
+        bash "$THEME" "${@:4}" 2>&1)
+    printf '%s' "$o" | grep -qF -- "$osc_open" && help_bad="$help_bad [$1]"
+    printf '%s\n' "$o" >>"$help_all"
+    return 0
+}
+# Every valid per-command help path, plus global help, with a poisoned
+# WALLPAPER_DIR. The list is the dispatch's own command set: a command added
+# without a display copy in its block fails here.
+for c in random set unsplash url list preview status rename rm help; do
+    help_run "$c--help" TermSAFE xtermSAFE "$c" --help
+done
+# The header's terminal name has two sources and a trusted third: TERM_PROGRAM
+# wins, TERM is the fallback, and the kitty branch is our OWN literal OSC 8
+# hyperlink — asserted separately below, because stripping it would be a
+# regression in the opposite direction.
+help_run help-TERM_PROGRAM "TermSAFE$oscpay" xtermSAFE help
+help_run help-TERM '' "xtermSAFE$oscpay" help
+if [ -n "$help_bad" ]; then
+    fail "OSC reached the terminal from help:$help_bad"
+else pass "no help path emits environment data as terminal protocol"; fi
+# Sanitizing must remove the control bytes and keep the text around them —
+# otherwise a green run above could mean help printed nothing at all.
+help_missing=""
+for marker in 'hlibSAFE' 'TermSAFE' 'xtermSAFE' 'LinuxSAFE' \
+    'Apply Commands' 'theme random' 'theme unsplash' 'theme rm'; do
+    grep -qF -- "$marker" "$help_all" || help_missing="$help_missing [$marker]"
+done
+if [ -z "$help_missing" ]; then
+    pass "printable environment text survives every help path"
+else fail "help sanitizing removed more than the control bytes:$help_missing"; fi
+# The kitty hyperlink is the ONE intentional control sequence in this output.
+# A blanket strip over the whole header would pass every assertion above while
+# silently deleting it, so it gets its own direction.
+kittyout=$(WALLPAPER_DIR="$sweeplib" WAL_CACHE="$helpcache" CONFIG_DIR="$helpcache" \
+    KITTY_CONFIG_DIRECTORY="$helpcache" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
+    PATH="$sweepbin:$PATH" KITTY_WINDOW_ID=1 bash "$THEME" help 2>&1)
+if printf '%s' "$kittyout" | grep -qF -- "$(printf '\033]8;;https://sw.kovidgoyal.net/kitty/')"; then
+    pass "the intentional kitty hyperlink survives sanitizing"
+else fail "sanitizing stripped the kitty hyperlink it was supposed to keep"; fi
+rm -f "$sweepbin/uname"
+
 # --- a CONTRIBUTOR name is remote free text under the same threat model -----
 STUB_WHO=$(printf 'Contributor\033]52;c;UkVNT1RF\007')
 export STUB_WHO

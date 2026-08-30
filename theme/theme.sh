@@ -1040,19 +1040,28 @@ usage() {
     else
         printf '  colorscheme:        <none>\n'
     fi
-    # In kitty the name is an OSC 8 hyperlink to its website.
+    # This header printfs directly instead of going through note(), so each
+    # runtime value needs its own display copy — $desk and $label above, $term
+    # and $os here. The kitty branch is the ONE trusted exception: that OSC 8
+    # hyperlink is our own literal, so it is assigned WITHOUT display_text,
+    # which would otherwise strip the very sequence it exists to emit.
     if [ -n "${KITTY_WINDOW_ID:-}" ]; then
         term=$(printf '\033]8;;https://sw.kovidgoyal.net/kitty/\akitty\033]8;;\a')
     else
-        term="${TERM_PROGRAM:-$TERM}"
+        # TERM_PROGRAM and TERM are environment data — a terminal profile, an
+        # inherited ssh environment or a hostile parent can put an OSC 52
+        # clipboard write in either, and this line prints it as a fact.
+        term=$(display_text "${TERM_PROGRAM:-$TERM}")
     fi
     printf '  terminal:           %s\n' "$term"
+    # uname/sw_vers are resolved through PATH, so this output is not ours to
+    # trust either, and being sure costs one call.
     if [ "$(uname -s)" = Darwin ]; then
         os="macOS $(sw_vers -productVersion 2>/dev/null) ($(uname -m))"
     else
         os=$(uname -srm)
     fi
-    printf '  os:                 %s\n' "$os"
+    printf '  os:                 %s\n' "$(display_text "$os")"
     cat <<EOF
 
 Apply Commands:
@@ -1084,12 +1093,25 @@ EOF
 }
 
 # Per-subcommand help for `theme <cmd> --help`.
+#
+# These blocks are heredocs, so they interpolate straight to the terminal
+# without passing through note()/die(). WALLPAPER_DIR is configuration data —
+# an environment variable, or a directory whose own name may legally contain
+# an OSC 52 clipboard write — so it is sanitized ONCE here and every block
+# below prints $wdir. One point of sanitization is what keeps this from
+# becoming five per-sink patches that a sixth block forgets; the help sweep in
+# the fixture is what proves no block prints the raw value.
+#
+# $wdir is display-only and is never opened, listed or written: the
+# operational WALLPAPER_DIR is untouched, exactly as everywhere else.
 usage_cmd() {
+    local wdir
+    wdir=$(display_text "$WALLPAPER_DIR")
     case "$1" in
     random) cat <<EOF
 theme random [--rotate left|right] [--extend[=RRGGBB]]
 
-  Pick a random wallpaper from $WALLPAPER_DIR and apply it everywhere:
+  Pick a random wallpaper from $wdir and apply it everywhere:
   desktop wallpaper + kitty recolor (live windows and future ones).
 
   Examples:
@@ -1101,7 +1123,7 @@ EOF
 theme set <image> [--rotate left|right] [--extend[=RRGGBB]]
 
   Apply a specific local wallpaper: desktop + palette + kitty.
-  <image> is a path or a name under $WALLPAPER_DIR (extension optional).
+  <image> is a path or a name under $wdir (extension optional).
 
   Examples:
     theme set spain-city-mountains
@@ -1111,7 +1133,7 @@ EOF
     unsplash) cat <<EOF
 theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
 
-  Fetch an Unsplash photo, save it into $WALLPAPER_DIR — named from your
+  Fetch an Unsplash photo, save it into $wdir — named from your
   query plus the photo's own description — then apply it (desktop +
   palette + kitty). Always downloads the RAW original rendition (the
   highest quality Unsplash serves), preferring 3840px+ photos on search.
@@ -1136,7 +1158,7 @@ EOF
 theme url <link> [--rotate left|right]
 
   Download an image from a direct URL or a Pinterest pin page, save it
-  into $WALLPAPER_DIR, then apply it (desktop + palette + kitty).
+  into $wdir, then apply it (desktop + palette + kitty).
 
   Sharpness: direct i.pinimg.com /NNNx/ downscales are auto-upgraded to
   the full-resolution /originals/ variant when it exists, and the desktop
@@ -1213,7 +1235,7 @@ EOF
     rm) cat <<EOF
 theme rm <wallpaper…>
 
-  Delete saved wallpapers by name — resolved in $WALLPAPER_DIR like
+  Delete saved wallpapers by name — resolved in $wdir like
   \`set\`/\`rename\` (extension optional), so no path is needed. Only
   library files can be deleted. Several names at once are fine.
 
