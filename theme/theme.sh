@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # theme — desktop wallpaper + terminal palette CLI (pywal).
-# Full documentation: ~/.config/scripts/README.md
+# Full documentation: ~/.config/theme/README.md
 # Set THEME_NO_APPLY=1 to exercise every code path without touching the desktop.
 
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config}"
@@ -832,7 +832,7 @@ theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
   A query needs no quotes; no query = fully random. Pasting a photo page
   link (unsplash.com/photos/…) fetches exactly that photo instead of
   searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
-  Keychain item (see scripts/README.md).
+  Keychain item (see README.md).
 
   theme unsplash status shows the API window for your key — requests
   left this hour, tier, key source. The check itself costs 1 request.

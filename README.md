@@ -23,10 +23,11 @@ gitignored.
 - `config` — identity (public noreply), nvim editor, gh credential helper
 - signing stays per-command by design; no keys here
 
-**`wallpapers/` + `scripts/`**
+**`wallpapers/` + `theme/`**
 - wallpaper library and the `theme` CLI (wallpaper + matching terminal
   colors, Unsplash/Pinterest fetch) — full docs in
-  [`scripts/README.md`](scripts/README.md)
+  [`theme/README.md`](theme/README.md). `theme/` is self-contained,
+  ready to split into its own repository.
 
 ## Install — fresh macOS
 
@@ -39,7 +40,7 @@ mkdir -p ~/.config/zsh/plugins && cd ~/.config/zsh/plugins
 git clone https://github.com/zsh-users/zsh-autosuggestions
 git clone https://github.com/zsh-users/zsh-syntax-highlighting
 git clone https://github.com/zsh-users/zsh-history-substring-search
-mkdir -p ~/.local/bin && ln -s ~/.config/scripts/theme.sh ~/.local/bin/theme
+mkdir -p ~/.local/bin && ln -s ~/.config/theme/theme.sh ~/.local/bin/theme
 exec zsh
 ```
 

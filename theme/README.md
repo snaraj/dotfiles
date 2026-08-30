@@ -1,13 +1,13 @@
-# scripts
+# theme
 
-Standalone tools that live in the dotfiles and are symlinked onto `PATH`.
-This is the detailed reference — the repo root README deliberately stays short.
+A single command that owns your desktop wallpaper and your terminal palette
+together, so they always agree. Self-contained: `theme.sh` (the CLI),
+`theme-boundary-tests.sh` (its regression fixture), and this README, with no
+dependency on anything else in the surrounding dotfiles — the folder is ready
+to become its own repository whenever you split it out.
 
----
-
-## `theme` — wallpaper + terminal palette CLI
-
-`theme.sh` is symlinked to `~/.local/bin/theme`, so `theme` works everywhere.
+It lives at `~/.config/theme/`; `theme.sh` is symlinked to
+`~/.local/bin/theme`, so `theme` works everywhere.
 
 One command owns two things that should always agree:
 
@@ -243,8 +243,8 @@ not be running — the reload is best-effort.
 brew install wallpaper pipx
 pipx install pywal
 mkdir -p ~/.local/bin
-ln -sf ~/.config/scripts/theme.sh ~/.local/bin/theme
-# ensure ~/.local/bin is on PATH (it is, via the shell rc in this repo)
+ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
+# ensure ~/.local/bin is on PATH
 theme list
 ```
 
@@ -258,7 +258,7 @@ The palette half works unchanged; the desktop half depends on the session:
 ```sh
 sudo apt install pipx curl file
 pipx install pywal          # or: pip install --user pywal
-ln -sf ~/.config/scripts/theme.sh ~/.local/bin/theme
+ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
 ```
 
 `theme` sets the desktop through GNOME (`gsettings`, when
