@@ -474,7 +474,7 @@ cmd_rename() {
     [ "$dest" = "$img" ] && { note "already named $(basename "$img")"; return 0; }
     [ -e "$dest" ] && die "$(basename "$dest") already exists"
     mv "$img" "$dest" || die "rename failed"
-    note "renamed $(basename "$img") -> $(basename "$dest")"
+    note "successfully renamed \"$(basename "$img")\" to \"$(basename "$dest")\""
     cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     if [ "$cur" = "$img" ]; then
         set_desktop "$dest"
@@ -674,7 +674,10 @@ esac
 # subcommand takes other flags, so any remaining leading dash is a mistake.
 case "${2:-}" in
 -h | --help) usage_cmd "${1:-}"; exit 0 ;;
--*) usage >&2; die "unknown option '${2}' for 'theme ${1}'" ;;
+-*)
+    # Just the error — dumping the full usage here buries it 25 lines deep.
+    die "unknown option '${2}' for 'theme ${1}' — try: theme ${1} --help"
+    ;;
 esac
 
 case "${1:-help}" in
@@ -699,5 +702,5 @@ list) cmd_list ;;
 status) cmd_status ;;
 rename) shift; [ -n "${1:-}" ] || die "usage: theme rename <wallpaper> <new name…>"; cmd_rename "$@" ;;
 help | -h | --help) usage ;;
-*) usage >&2; die "unknown command '$1'" ;;
+*) die "unknown command '$1' — run 'theme help' for the list" ;;
 esac
