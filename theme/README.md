@@ -185,12 +185,24 @@ call `set-colors` and nothing else — no window reads, no send-text, no
 launch. `kitten @ set-colors --all --configured`
 recolors existing windows *and* updates the instance's stored config, so
 windows opened later inherit the new palette too — no restart, no new window.
-The socket is the *only* path to a running instance: there is no `SIGUSR1`
-fallback. `SIGUSR1` makes kitty reload its entire config, which resets runtime
-state (font-size zoom, resized panes), and a theme change may touch colors
-only. An instance no socket reaches simply keeps its old palette until its
-next window reads the include — so after pulling this config, quit and reopen
-kitty once so the instance carries the socket.
+The socket is the *only* path to a running instance. There is no `SIGUSR1`
+fallback: it would reload the entire config, resetting runtime state
+(font-size zoom, resized panes), and a theme change may touch colors only.
+(The `pkill -USR1 -x kitty` that used to sit here never fired anyway — macOS
+reports the process name as the full bundle path, so the `-x` exact match
+never matched.)
+
+`kitty.conf` also sets `auto_reload_config -1`. kitty 0.48 watches the whole
+include chain every 0.1s by default, and that chain reaches pywal's cache,
+which `theme set` rewrites on every run — so each theme change was triggering
+a full config reload and resetting zoom and pane state. This, not the signal,
+was the cause. Note that kitty ignores changes to `auto_reload_config` made
+during a reload, so the setting takes effect at the **next kitty launch**;
+until then a running instance still resets on a theme change.
+
+An instance no socket reaches simply keeps its old palette until its next
+window reads the include — so after pulling this config, quit and reopen kitty
+once so the instance carries the socket.
 
 `kitten themes` (built into kitty) writes the same `current-theme.conf`, so the
 two coexist; `theme status` will report whatever is currently included.

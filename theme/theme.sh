@@ -249,8 +249,9 @@ save_wallpaper() {
 # Remote control (kitty.conf: allow_remote_control password + listen_on
 # unix:/tmp/kitty-samuel + remote_control_password "" set-colors, i.e. a
 # passwordless socket client may call set-colors and NOTHING else) is the
-# reliable path — a running instance ignores SIGUSR1 on this machine, and its
-# windows (old and new) keep the in-memory palette forever. set-colors
+# reliable path. The removed `pkill -USR1 -x kitty` fallback was never a second
+# path: macOS reports the process name as the full bundle path, so the -x exact
+# match never matched and the signal was never delivered. set-colors
 # --configured also updates the instance's stored config, so windows opened
 # later inherit the new palette too. NO SIGUSR1 fallback (owner directive
 # 2026-08-30): a full config reload resets runtime state — font-size zoom,
