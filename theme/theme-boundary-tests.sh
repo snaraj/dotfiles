@@ -116,6 +116,39 @@ check  "rm with trailing unknown flag refused" 1 run "$lib" rm keepme.jpg --bogu
 exists "no partial delete before flag error"   yes "$lib/keepme.jpg"
 check  "set with trailing unknown flag refused" 1 run "$lib" set keepme.jpg --bogus
 
+# --- right-column values are BOUNDED and control-sanitized (Codex round 9) -
+# A custom download host in the theme.source xattr is arbitrary-length data
+# from disk: it must truncate to the preview's right column (both the
+# fallback and the kitty-image layout) and to list -v's 10-wide SOURCE
+# field, and control bytes must never reach the aligned tables raw.
+printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
+    base64 -d >"$lib/long-src.png"
+xattr -w theme.source "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bb.invalid/x" "$lib/long-src.png" 2>/dev/null
+pv_out=$(COLUMNS=60 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview long-src 2>/dev/null)
+# At 60 columns availw is 25: 24 a's then an ellipsis, and never a 25th 'a'.
+if printf '%s' "$pv_out" | grep -q 'SOURCE       aaaaaaaaaaaaaaaaaaaaaaaa…'; then
+    pass "preview truncates a long source (fallback layout)"
+else fail "preview fallback layout leaked a long source"; fi
+if printf '%s' "$pv_out" | grep -q 'aaaaaaaaaaaaaaaaaaaaaaaaa'; then
+    fail "preview fallback layout exceeded the column bound"
+else pass "no over-length source run in fallback layout"; fi
+pv_out=$(COLUMNS=60 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID=1 bash "$THEME" preview long-src 2>/dev/null)
+if printf '%s' "$pv_out" | grep -q 'aaaaaaaaaaaaaaaaaaaaaaaa…'; then
+    pass "preview truncates a long source (image layout)"
+else fail "preview image layout leaked a long source"; fi
+lv_out=$(COLUMNS=100 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" list -v 2>/dev/null)
+if printf '%s' "$lv_out" | grep -q 'aaaaaaaaa…  png'; then
+    pass "list -v bounds the SOURCE field"
+else fail "list -v SOURCE field shifted later columns"; fi
+printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
+    base64 -d >"$lib/ctrl-src.png"
+xattr -w theme.source "$(printf 'bad\nline\airl')" "$lib/ctrl-src.png" 2>/dev/null
+pv_out=$(COLUMNS=80 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview ctrl-src 2>/dev/null)
+if printf '%s' "$pv_out" | grep -q 'SOURCE       badlineirl'; then
+    pass "control bytes in the source xattr are stripped"
+else fail "control bytes reached the preview table"; fi
+rm -f "$lib/long-src.png" "$lib/ctrl-src.png"
+
 # --- list -v outside kitty: no preview column, but it must RENDER ----------
 # (Codex round-8 finding 3: an unset preview width left `cols - 71 -` in the
 # arithmetic and verbose list died before printing a row.)
