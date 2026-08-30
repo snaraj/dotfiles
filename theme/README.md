@@ -40,6 +40,9 @@ theme list [-v]          # wallpaper table, latest added first: title +
                          #   preview, source, format, size, date added; a
                          #   truncated title copied from the table resolves
                          #   in set/rename/rm when uniquely matched)
+theme preview [name]     # one wallpaper up close: larger picture +
+                         #   colorscheme, title, location (defaults to the
+                         #   current wallpaper)
 theme status             # current theme: mode, color-scheme swatches, variables
 theme rename <w> <n…>    # rename a saved wallpaper (slugified, extension kept)
 theme rm <w…>            # delete saved wallpapers by name (library only)

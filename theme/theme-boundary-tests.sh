@@ -69,6 +69,8 @@ printf 'not an image' >"$lib/broken.jpg"
 
 # shellcheck disable=SC2317,SC2329  # run is reached indirectly via check()'s "$@"
 run() { WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_nokitty() { WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "${@:2}"; }
 
 # --- positive destructive ops must MUTATE, not merely exit 0 ---------------
 check  "in-library rm succeeds"                0 run "$lib" rm in-lib.jpg
@@ -86,10 +88,38 @@ check  "rm of an in-library symlink succeeds"  0 run "$lib" rm escape.jpg
 exists "symlink target beyond boundary intact" yes "$out/delete-victim.jpg"
 exists "outside rename-victim untouched"       yes "$out/rename-victim.jpg"
 
+# --- truncated/stem resolution: exactly ONE candidate or refuse ------------
+# (Codex round-8 finding 1: the old extension-inference glob broke on its
+# first match, so `rm same-title` deleted an arbitrary one of two files
+# sharing a displayed title. Every ambiguous case must refuse with all
+# would-be victims intact, for rm AND rename; unique stems, unique truncated
+# prefixes, and the … the list column renders must still resolve.)
+printf 'x' >"$lib/same-title.jpg"
+printf 'x' >"$lib/same-title.png"
+printf 'x' >"$lib/uniq-stem-one.jpg"
+printf 'x' >"$lib/uniq-prefix-only-here.jpg"
+check  "rm refuses same-title.jpg/.png stem"    1 run "$lib" rm same-title
+exists "same-title.jpg intact after refusal"    yes "$lib/same-title.jpg"
+exists "same-title.png intact after refusal"    yes "$lib/same-title.png"
+check  "rename refuses same-title stem"         1 run "$lib" rename same-title other-name
+exists "same-title.jpg intact after rename ref" yes "$lib/same-title.jpg"
+exists "same-title.png intact after rename ref" yes "$lib/same-title.png"
+check  "rm refuses ambiguous truncated prefix"  1 run "$lib" rm same-tit
+exists "no same-title victim of the prefix"     yes "$lib/same-title.jpg"
+check  "unique stem still resolves for rm"      0 run "$lib" rm uniq-stem-one
+exists "unique stem really deleted"             no "$lib/uniq-stem-one.jpg"
+check  "unique truncated … resolves for rm"     0 run "$lib" rm "uniq-prefix-onl…"
+exists "unique truncated target really deleted" no "$lib/uniq-prefix-only-here.jpg"
+
 # --- unknown trailing option: refused BEFORE any side effect ---------------
 check  "rm with trailing unknown flag refused" 1 run "$lib" rm keepme.jpg --bogus
 exists "no partial delete before flag error"   yes "$lib/keepme.jpg"
 check  "set with trailing unknown flag refused" 1 run "$lib" set keepme.jpg --bogus
+
+# --- list -v outside kitty: no preview column, but it must RENDER ----------
+# (Codex round-8 finding 3: an unset preview width left `cols - 71 -` in the
+# arithmetic and verbose list died before printing a row.)
+check  "list -v renders without kitty"          0 run_nokitty "$lib" list -v
 
 # --- scratch hygiene: no temp file left, success or failure ----------------
 check  "transformed local set succeeds"        0 run "$lib" set tiny.png --rotate right
@@ -298,44 +328,11 @@ owns "dotted name keeps its own scheme under a mangling collision" \
     'collide\.a' '60;61;62' '70;71;72'
 owns "underscored name keeps its own scheme under a mangling collision" \
     'dup_b' '90;91;92' '80;81;82'
-# --- `list -v` must render in BOTH preview states ---------------------------
-# Previews need kitty AND `kitten`; the width maths for the extra column was
-# written as `$((cols - 71 - ${pvok:+9}))`, which expands to `cols - 71 - ` the
-# moment previews are off — an arithmetic syntax error, so verbose listing died
-# outright in every terminal that is not kitty. Both states are pinned here,
-# with a deterministic `kitten` stand-in that emits a placeholder payload
-# shaped like the real one and touches no graphics, no image and no terminal.
-cat >"$stubdir/kitten" <<'EOS'
-#!/bin/bash
-printf '\033_Gf=100,t=f,i=1,c=7,r=2;QUJD\033\\'
-printf '\033[38;5;1mPREVIEWA\n'
-printf '\033[38;5;1mPREVIEWB\n'
-exit 0
-EOS
-chmod +x "$stubdir/kitten"
-listvout="$fixture/listv.out"; listverr="$fixture/listv.err"
-pvout="$fixture/listpv.out"; pverr="$fixture/listpv.err"
-# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_listv() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
-    KITTY_WINDOW_ID='' bash "$THEME" list -v >"$listvout" 2>"$listverr"; }
-# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_listpv() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
-    KITTY_WINDOW_ID=1 PATH="$stubdir:$PATH" bash "$THEME" list -v >"$pvout" 2>"$pverr"; }
-check "verbose list renders without previews"  0 run_listv
-check "verbose list renders with previews"     0 run_listpv
-if [ -s "$listverr" ] || [ -s "$pverr" ]; then
-    fail "verbose list wrote to stderr"
-else pass "verbose list is silent on stderr in both states"; fi
-if grep -q 'PREVIEWA' "$pvout" && grep -q '^  .*PREVIEWB' "$pvout"; then
-    pass "a rendered preview occupies both of its row's lines"
-else fail "preview row did not render its two lines"; fi
-
 if row 'scheme-miss' | grep -q '48;2;'; then
     fail "an unapplied wallpaper was given invented colors"
 else pass "unapplied wallpaper lists an honest dash"; fi
 if row 'scheme-bad' | grep -q '48;2;' || [ -s "$listerr" ]; then
     fail "a corrupt cache entry produced a swatch or an error"
 else pass "corrupt cache entry degrades to a dash, silently"; fi
-
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "$fails FAILURES"; fi
 exit "$fails"

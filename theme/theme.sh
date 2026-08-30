@@ -250,14 +250,26 @@ prefix_match() { # $1 name-or-prefix
     printf '%s' "$hit"
 }
 
+# One cardinality-checked resolution for every non-exact name: a bare stem
+# ("foo" for foo.jpg) resolves only while it names exactly ONE file — with
+# foo.jpg AND foo.png present it refuses instead of picking one (Codex
+# round-8 finding 1: a first-glob-match here deleted an arbitrary sibling) —
+# then a truncated title falls through to the same unique-prefix rule.
+library_match() { # $1 stem-or-prefix
+    local f hit="" n=0
+    for f in "$WALLPAPER_DIR/$1".*; do
+        [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
+    done
+    [ "$n" -eq 1 ] && { printf '%s' "$hit"; return 0; }
+    [ "$n" -gt 1 ] && return 1
+    prefix_match "$1"
+}
+
 resolve_local() {
     local f
     [ -f "$1" ] && { printf '%s' "$1"; return 0; }
     [ -f "$WALLPAPER_DIR/$1" ] && { printf '%s' "$WALLPAPER_DIR/$1"; return 0; }
-    for f in "$WALLPAPER_DIR/$1".*; do
-        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
-    done
-    f=$(prefix_match "$1") && { printf '%s' "$f"; return 0; }
+    f=$(library_match "$1") && { printf '%s' "$f"; return 0; }
     return 1
 }
 
@@ -574,39 +586,51 @@ wall_scheme() { # $1 file
         sed -n 's/.*"color[0-9]": *"#\([0-9a-fA-F]\{6\}\)".*/\1/p' | head -8
 }
 
-# A tiny inline picture preview for `list -v`, via kitty's graphics protocol
-# in unicode-placeholder mode: icat transmits a downscaled image and emits
+# An inline picture preview via kitty's graphics protocol in
+# unicode-placeholder mode: icat transmits a downscaled image and emits
 # placeholder cells that flow with text. icat's own output positions
 # absolutely (meant for preview panes), so we strip the cursor choreography
 # and re-emit just the transmission plus each line of cells, re-applying the
-# image-id color per line. Sets PV_APC (transmit once), PV1/PV2 (one line of
-# cells each, color-wrapped), PV_W (cell width). kitty-only by its nature.
+# image-id color per line. render_preview <file> <cols> <rows> sets PV_APC
+# (transmit once), PV_ROWS[] (one padded, color-wrapped line of cells per
+# row) and PV_H (row count). kitty-only by its nature.
 PREVIEW_COLS=7
-wall_preview() { # $1 file
+render_preview() { # $1 file  $2 cols  $3 rows
     [ -n "${KITTY_WINDOW_ID:-}" ] || return 1
     command -v kitten >/dev/null 2>&1 || return 1
-    local out rest color rows w pad
+    local out rest color line w pad i
     out=$(kitten icat --unicode-placeholder --transfer-mode=file --stdin=no \
         --use-window-size 100,50,2000,1000 \
-        --place="${PREVIEW_COLS}x2@0x0" "$1" 2>/dev/null) || return 1
+        --place="${2}x${3}@0x0" "$1" 2>/dev/null) || return 1
     case "$out" in *$'\e\\'*) ;; *) return 1 ;; esac
     PV_APC="${out%%$'\e\\'*}"$'\e\\'
     PV_APC="${PV_APC#$'\r'}"
     rest="${out#*$'\e\\'}"
     color=$(printf '%s' "$rest" | grep -o $'\e\[38[:;][0-9:;]*m' | head -1)
-    rows=$(printf '%s' "$rest" | sed $'s/\e7//g; s/\e8//g; s/\e\[[0-9;]*H//g; s/\r//g; s/\e\[[0-9]*C//g; s/\e\[39m//g; s/\e\[38[:;][0-9:;]*m//g')
-    PV1=$(printf '%s' "$rows" | sed -n 1p)
-    PV2=$(printf '%s' "$rows" | sed -n 2p)
-    [ -n "$PV1" ] || return 1
+    rest=$(printf '%s' "$rest" | sed $'s/\e7//g; s/\e8//g; s/\e\[[0-9;]*H//g; s/\r//g; s/\e\[[0-9]*C//g; s/\e\[39m//g; s/\e\[38[:;][0-9:;]*m//g')
     w=$(printf '%s' "$PV_APC" | sed -n 's/.*[,;]c=\([0-9]*\).*/\1/p')
-    case "$w" in '' | *[!0-9]*) w=$PREVIEW_COLS ;; esac
-    pad=$((PREVIEW_COLS - w))
-    [ "$pad" -gt 0 ] && {
-        PV1="$PV1$(printf '%*s' "$pad" '')"
-        PV2="${PV2}$(printf '%*s' "$pad" '')"
-    }
-    PV1="${color}${PV1}"$'\e[39m'
-    PV2="${color}${PV2}"$'\e[39m'
+    case "$w" in '' | *[!0-9]*) w=$2 ;; esac
+    pad=$(( $2 - w ))
+    PV_ROWS=(); PV_H=0
+    i=1
+    while [ "$i" -le "$3" ]; do
+        line=$(printf '%s' "$rest" | sed -n "${i}p")
+        [ -n "$line" ] || break
+        [ "$pad" -gt 0 ] && line="$line$(printf '%*s' "$pad" '')"
+        PV_ROWS+=("${color}${line}"$'\e[39m')
+        PV_H=$((PV_H + 1))
+        i=$((i + 1))
+    done
+    [ "$PV_H" -gt 0 ] || return 1
+    return 0
+}
+
+# The list row's two-line thumbnail, in terms of render_preview. Keeps the
+# PV_APC/PV1/PV2 shape cmd_list already prints.
+wall_preview() { # $1 file
+    render_preview "$1" "$PREVIEW_COLS" 2 || return 1
+    PV1="${PV_ROWS[0]}"
+    PV2="${PV_ROWS[1]:-$(printf '%*s' "$PREVIEW_COLS" '')}"
     return 0
 }
 
@@ -620,11 +644,7 @@ cmd_list() {
     local cols namew f name src fmt bytes added c r g b n
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
     local pvok="" pvw=0
-    [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && pvok=1
-    # The preview column's width as a NUMBER, not a substitution: `$((cols - 71
-    # - ${pvok:+9}))` expands to `cols - 71 - ` whenever previews are off, which
-    # is an arithmetic syntax error, so `list -v` died outside kitty entirely.
-    [ -n "$pvok" ] && pvw=9
+    [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && { pvok=1; pvw=9; }
     if [ -n "$VERBOSE" ]; then namew=$((cols - 71 - pvw)); else namew=$((cols - 32)); fi
     [ "$namew" -gt 44 ] && namew=44
     [ "$namew" -lt 16 ] && namew=16
@@ -673,6 +693,72 @@ cmd_list() {
             # Second line of the picture preview, when one rendered.
             if [ -n "$PV2" ]; then printf '  %s\n' "$PV2"; fi
         done
+}
+
+# One wallpaper up close, styled like the list: a larger picture on the
+# left (kitty graphics; skipped gracefully elsewhere) and, on the right,
+# the labeled facts plus a larger render of its colorscheme. No argument
+# previews the CURRENT wallpaper; a name (truncated titles welcome)
+# previews that one.
+cmd_preview() { # $1 optional wallpaper name/path
+    local img name loc src dims bytes sw c r g b i line
+    if [ -n "$1" ]; then
+        img=$(resolve_local "$1") || die "no wallpaper uniquely matching '$1' (looked in $WALLPAPER_DIR)"
+    else
+        img=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+        [ -n "$img" ] && [ -f "$img" ] || die "no current wallpaper to preview — name one: theme preview <wallpaper>"
+    fi
+    name=$(basename "$img"); name="${name%.*}"
+    loc="$img"
+    case "$loc" in "$HOME"/*) loc="~${loc#"$HOME"}" ;; esac
+    src=$(wall_source "$img")
+    dims=$(img_size "$img")
+    bytes=$(stat -f %z "$img" 2>/dev/null || printf 0)
+    bytes=$(awk -v b="$bytes" 'BEGIN{ if (b >= 1048576) printf "%.1fM", b/1048576; else printf "%.0fK", b/1024 }')
+    sw=""
+    for c in $(wall_scheme "$img"); do
+        r=$((16#${c:0:2})); g=$((16#${c:2:2})); b=$((16#${c:4:2}))
+        sw="$sw$(printf '\033[48;2;%d;%d;%dm    \033[0m ' "$r" "$g" "$b")"
+    done
+    [ -n "$sw" ] || sw='-'
+    # Values must FIT the right-hand column — a wrapped line lands at column
+    # 0 and shreds the whole block — so the title truncates with … (a
+    # truncated title still resolves via prefix match). LOCATION gets its own
+    # full-width line under the block instead: paths are the one value too
+    # long to truncate honestly, and down there a narrow window wraps nothing
+    # that has to stay aligned.
+    local cols availw
+    cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
+    availw=$((cols - 22 - 13))
+    [ "$availw" -lt 12 ] && availw=12
+    [ "${#name}" -gt "$availw" ] && name="$(printf '%.*s' $((availw - 1)) "$name")…"
+    local rlines=(
+        ""
+        "$(printf '%-12s %s' TITLE "$name")"
+        "$(printf '%-12s %s' SOURCE "$src")"
+        "$(printf '%-12s %s' SIZE "${dims:-?}${bytes:+ ($bytes)}")"
+        ""
+        "COLORSCHEME"
+        "$sw"
+        ""
+    )
+    printf 'wallpaper preview\n\n'
+    PV_APC=""; PV_ROWS=(); PV_H=0
+    if render_preview "$img" 18 8; then
+        printf '%s' "$PV_APC"
+        i=0
+        while [ "$i" -lt 8 ]; do
+            line="${PV_ROWS[$i]:-$(printf '%-18s' '')}"
+            printf '  %s  %s\n' "$line" "${rlines[$i]:-}"
+            i=$((i + 1))
+        done
+    else
+        for line in "${rlines[@]}"; do
+            printf '  %s\n' "$line"
+        done
+    fi
+    printf '  %-12s %s\n' LOCATION "$loc"
+    return 0
 }
 
 # Print the 16 palette colors as truecolor blocks, 8 per row — the same
@@ -744,20 +830,21 @@ cmd_status() {
 # `..`, absolute paths, and nested paths can never reach a destructive verb —
 # and the match is re-checked by canonical physical path (symlink-proof).
 resolve_library() {
-    local cand="" f real dirreal
+    local cand="" real dirreal
     case "$1" in
     */* | .* ) return 1 ;;
     esac
+    # An EXACT filename resolves directly. Anything else — a bare stem or a
+    # truncated title copied from `theme list` — goes through library_match's
+    # cardinality checks, so a destructive verb resolves ONLY when exactly
+    # one library file matches; foo.jpg beside foo.png refuses rather than
+    # deleting an arbitrary one. The canonical containment check below still
+    # applies to whatever was found.
     if [ -f "$WALLPAPER_DIR/$1" ]; then
         cand="$WALLPAPER_DIR/$1"
     else
-        for f in "$WALLPAPER_DIR/$1".*; do
-            [ -f "$f" ] && { cand="$f"; break; }
-        done
+        cand=$(library_match "$1") || return 1
     fi
-    # Truncated copy-paste from `theme list`: unique prefix only, and the
-    # canonical containment check below still applies to whatever it found.
-    [ -n "$cand" ] || cand=$(prefix_match "$1") || return 1
     [ -n "$cand" ] || return 1
     dirreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) || return 1
     real=$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P) || return 1
@@ -857,6 +944,8 @@ usage() {
                          (pinimg /NNNx/ downscales auto-upgrade to /originals/)
   theme list [-v]        wallpaper table, latest first: title + colorscheme;
                          -v adds source, format, size, date added
+  theme preview [name]   one wallpaper up close: larger picture + colorscheme,
+                         title, location (current wallpaper if no name)
   theme status           current theme, color-scheme swatches, variables
   theme rename <w> <n…>  rename a saved wallpaper, keeping the naming format
   theme rm <w…>          delete saved wallpapers by name (no path needed)
@@ -968,6 +1057,21 @@ theme list [-v]
     theme list -v
 EOF
         ;;
+    preview) cat <<EOF
+theme preview [name]
+
+  One wallpaper up close, styled like the list: a larger picture on the
+  left (kitty only; skipped elsewhere) and the labeled facts on the
+  right — title, location (~/path), source, size — plus a larger render
+  of its colorscheme. With no name it previews the CURRENT wallpaper; a
+  truncated title copied from theme list works when uniquely matched.
+
+  Examples:
+    theme preview
+    theme preview neon-pink-and-purple-light-particles
+    theme preview trees-on-forest…
+EOF
+        ;;
     status) cat <<EOF
 theme status
 
@@ -1076,6 +1180,7 @@ unsplash)
     ;;
 url) cmd_url "${2:-}" ;;
 list) cmd_list ;;
+preview) cmd_preview "${2:-}" ;;
 status) cmd_status ;;
 rename) shift; [ -n "${1:-}" ] || die "usage: theme rename <wallpaper> <new name…>"; cmd_rename "$@" ;;
 rm) shift; [ -n "${1:-}" ] || die "usage: theme rm <wallpaper…>"; cmd_rm "$@" ;;
