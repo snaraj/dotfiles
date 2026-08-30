@@ -35,8 +35,9 @@ theme unsplash status    # API window: requests left this hour, tier, key
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
 theme … --rotate left|right   # any image command: turn 90° before applying
 theme … --extend[=RRGGBB]     # pad flat-background art to screen shape (default 000000)
-theme list [-v]          # wallpaper table, latest added first: title + source
-                         #   (-v adds format, size, date added)
+theme list [-v]          # wallpaper table, latest added first: title +
+                         #   colorscheme render (-v adds source, format,
+                         #   size, date added)
 theme status             # current theme: mode, color-scheme swatches, variables
 theme rename <w> <n…>    # rename a saved wallpaper (slugified, extension kept)
 theme rm <w…>            # delete saved wallpapers by name (library only)

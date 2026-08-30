@@ -515,19 +515,38 @@ wall_source() { # $1 file
     esac
 }
 
-# Wallpapers as a table, LATEST ADDED first (APFS birth time), titles
-# truncated to the terminal; -v adds format, size, and the date added.
+# The first 8 palette colors a wallpaper DERIVED when it was last applied,
+# read from pywal's own scheme cache (path-mangled filename, any backend) in
+# $WAL_CACHE/schemes — already outside the repo, so the render is a small
+# JSON read per file, never an image reprocess. hex without '#', one per
+# line. A wallpaper never applied has no cached scheme: the caller renders an
+# honest dash rather than computing one at list time.
+wall_scheme() { # $1 file
+    local m s
+    m=$(printf '%s' "$1" | tr '/.' '__')
+    # shellcheck disable=SC2012  # the mangled name is [A-Za-z0-9_] only; ls -t
+    # picks the newest cached scheme (latest backend), which find cannot order.
+    s=$(ls -t "$WAL_CACHE/schemes/${m}"_*.json 2>/dev/null | head -1)
+    [ -n "$s" ] || return 1
+    tr ',' '\n' <"$s" | sed -n 's/.*"color[0-9]": *"#\([0-9a-fA-F]*\)".*/\1/p' | head -8
+}
+
+# Wallpapers as a table, LATEST ADDED first (APFS birth time): truncated
+# title plus a small render of the scheme that wallpaper derives — snappy,
+# because the scheme comes from pywal's cache, not the image. Source (an
+# xattr/mdls read per file), format, size, and date all live behind -v, so
+# the default listing does no per-file metadata work and stays instant.
 cmd_list() {
-    local cols namew f name src fmt bytes added
+    local cols namew f name src fmt bytes added c r g b n
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
-    if [ -n "$VERBOSE" ]; then namew=$((cols - 44)); else namew=$((cols - 15)); fi
-    [ "$namew" -gt 72 ] && namew=72
-    [ "$namew" -lt 20 ] && namew=20
+    if [ -n "$VERBOSE" ]; then namew=$((cols - 71)); else namew=$((cols - 32)); fi
+    [ "$namew" -gt 44 ] && namew=44
+    [ "$namew" -lt 16 ] && namew=16
     printf 'wallpapers (%s), latest first:\n\n' "$WALLPAPER_DIR"
     if [ -n "$VERBOSE" ]; then
-        printf '  %-*s  %-10s  %-6s  %-7s  %s\n' "$namew" TITLE SOURCE FORMAT SIZE ADDED
+        printf '  %-*s  %-24s  %-10s  %-6s  %-7s  %s\n' "$namew" TITLE COLORSCHEME SOURCE FORMAT SIZE ADDED
     else
-        printf '  %-*s  %s\n' "$namew" TITLE SOURCE
+        printf '  %-*s  %s\n' "$namew" TITLE COLORSCHEME
     fi
     find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null |
         while IFS= read -r f; do
@@ -537,16 +556,27 @@ cmd_list() {
             name=$(basename "$f")
             name="${name%.*}"
             [ "${#name}" -gt "$namew" ] && name="$(printf '%.*s' $((namew - 1)) "$name")…"
-            src=$(wall_source "$f")
+            printf '  %-*s  ' "$namew" "$name"
+            # 8 swatches of 2 cells + a trailing space = exactly 24 columns of
+            # visible width, so the -v columns after stay aligned; a wallpaper
+            # with no cached scheme shows a single dash in that width.
+            n=0
+            for c in $(wall_scheme "$f"); do
+                r=$((16#${c:0:2})); g=$((16#${c:2:2})); b=$((16#${c:4:2}))
+                printf '\033[48;2;%d;%d;%dm  \033[0m ' "$r" "$g" "$b"
+                n=$((n + 1))
+            done
+            [ "$n" -eq 0 ] && printf '%-24s' '-'
+            [ "$n" -gt 0 ] && [ -n "$VERBOSE" ] && { while [ "$n" -lt 8 ]; do printf '   '; n=$((n + 1)); done; }
             if [ -n "$VERBOSE" ]; then
+                src=$(wall_source "$f")
                 fmt="${f##*.}"
                 bytes=$(stat -f %z "$f" 2>/dev/null || printf 0)
                 bytes=$(awk -v b="$bytes" 'BEGIN{ if (b >= 1048576) printf "%.1fM", b/1048576; else printf "%.0fK", b/1024 }')
                 added=$(stat -f '%SB' -t '%Y-%m-%d' "$f" 2>/dev/null)
-                printf '  %-*s  %-10s  %-6s  %-7s  %s\n' "$namew" "$name" "$src" "$fmt" "$bytes" "$added"
-            else
-                printf '  %-*s  %s\n' "$namew" "$name" "$src"
+                printf '  %-10s  %-6s  %-7s  %s' "$src" "$fmt" "$bytes" "$added"
             fi
+            printf '\n'
         done
 }
 
@@ -727,8 +757,8 @@ usage() {
   theme unsplash status  Unsplash API usage: requests left this hour, key, tier
   theme url <link>       direct image URL or Pinterest pin: download, save, apply
                          (pinimg /NNNx/ downscales auto-upgrade to /originals/)
-  theme list [-v]        wallpaper table, latest first: title + source; -v adds
-                         format, size, date added
+  theme list [-v]        wallpaper table, latest first: title + colorscheme;
+                         -v adds source, format, size, date added
   theme status           current theme, color-scheme swatches, variables
   theme rename <w> <n…>  rename a saved wallpaper, keeping the naming format
   theme rm <w…>          delete saved wallpapers by name (no path needed)
@@ -823,10 +853,13 @@ EOF
 theme list [-v]
 
   Wallpapers as a table sorted by LATEST ADDED. Columns: title
-  (truncated to the terminal) and source — the
-  site it came from (unsplash, pinterest, reddit, …), recorded when
-  theme downloads it and read from macOS download metadata otherwise;
-  an unknown source shows "-". -v adds format, size, and date added.
+  (truncated to the terminal) and a small render of the colorscheme
+  that wallpaper derived when it was last applied (from the palette
+  cache — a wallpaper never applied shows "-", nothing is computed at
+  list time, so the listing stays instant). -v adds source — the site
+  it came from (unsplash, pinterest, reddit, …), recorded at download
+  time or read from macOS download metadata, "-" when unknown —
+  plus format, size, and date added.
 
   Examples:
     theme list
