@@ -211,7 +211,11 @@ set_desktop() {
 set_palette() {
     dry && { note "[no-apply] would derive a pywal palette from $1"; return 0; }
     command -v wal >/dev/null 2>&1 || die "pywal not installed (pipx install pywal)"
-    wal -i "$1" --backend colorz >/dev/null 2>&1 || wal -i "$1" >/dev/null 2>&1 ||
+    # colorz refuses near-monochrome art ("not enough colors");
+    # modern_colorthief (pipx inject pywal modern_colorthief) handles those.
+    wal -i "$1" --backend colorz >/dev/null 2>&1 ||
+        wal -i "$1" --backend modern_colorthief >/dev/null 2>&1 ||
+        wal -i "$1" >/dev/null 2>&1 ||
         die "pywal failed on $1"
     [ -f "$WAL_CACHE/colors-kitty.conf" ] ||
         die "pywal wrote no kitty colors in $WAL_CACHE — point WAL_CACHE at pywal's own cache dir"
@@ -293,8 +297,10 @@ import re
 name = best.get("alt_description") or best.get("description") or ""
 if not name:
     name = re.sub(r"-[A-Za-z0-9_-]{11}$", "", best.get("slug") or "") or best.get("id") or "photo"
+# raw = the untouched original upload (highest quality); full is a q=85
+# re-compressed jpg. Sharpness first: raw, then full as the fallback.
 print("\t".join(str(x) for x in (
-    u.get("full") or u.get("raw", ""), best.get("width", 0), best.get("height", 0),
+    u.get("raw") or u.get("full", ""), best.get("width", 0), best.get("height", 0),
     name,
     (best.get("links") or {}).get("download_location", ""),
     (best.get("user") or {}).get("name", ""))))
@@ -307,18 +313,35 @@ unsplash_key() {
 }
 
 cmd_unsplash() {
-    local key url json img_url w h slug dl who
+    local key url json img_url w h slug dl who query="$1" pick=""
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
-    url="https://api.unsplash.com/photos/random?count=5&orientation=landscape&content_filter=high"
-    [ -n "$1" ] && url="$url&query=$(printf '%s' "$1" | sed 's/ /%20/g')"
+    case "$1" in
+    *unsplash.com/photos/*)
+        # A photo-page link fetches THAT photo, not a search: the API's
+        # /photos/:id endpoint accepts the page slug (and the bare photo id).
+        pick="${1##*/photos/}"
+        pick="${pick%%\?*}"
+        pick="${pick%%/*}"
+        [ -n "$pick" ] || die "no photo id in that Unsplash link"
+        url="https://api.unsplash.com/photos/$pick"
+        query=""
+        ;;
+    *)
+        url="https://api.unsplash.com/photos/random?count=5&orientation=landscape&content_filter=high"
+        [ -n "$1" ] && url="$url&query=$(printf '%s' "$1" | sed 's/ /%20/g')"
+        ;;
+    esac
     # The key goes to curl via stdin config, never argv, so it stays out of `ps`.
     json=$(printf 'header = "Authorization: Client-ID %s"\n' "$key" |
         curl -fsL --max-time 30 -K - "$url") || die "Unsplash request failed (bad key, rate limit, or no network)"
     IFS=$'\t' read -r img_url w h slug dl who < <(printf '%s' "$json" | python3 -c "$UNSPLASH_PY") ||
         die "Unsplash returned no usable photo"
     [ -n "$img_url" ] || die "Unsplash returned no image URL"
-    [ "$w" -ge 3840 ] 2>/dev/null || note "best of 5 candidates is ${w}x${h} (wanted 3840px+)"
+    if [ "$w" -ge 3840 ] 2>/dev/null; then :
+    elif [ -n "$pick" ]; then note "that photo's original is ${w}x${h} (under 3840px)"
+    else note "best of 5 candidates is ${w}x${h} (wanted 3840px+)"
+    fi
     scratch_new
     curl -fsL --max-time 90 -A "$UA" -o "$SCRATCH" "$img_url" || die "photo download failed"
     local mime; mime=$(file -b --mime-type "$SCRATCH")
@@ -328,7 +351,7 @@ cmd_unsplash() {
     # photographer is credited in the terminal note, not the filename.
     maybe_rotate "$SCRATCH"
     maybe_extend "$SCRATCH"
-    save_wallpaper "$SCRATCH" "$mime" "${1:+$1 }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
+    save_wallpaper "$SCRATCH" "$mime" "${query:+$query }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     scratch_done
     # Unsplash API guideline: report the download so the photographer is credited.
     [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
@@ -619,20 +642,23 @@ theme static [name]
 EOF
         ;;
     unsplash) cat <<EOF
-theme unsplash [query…]
+theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
 
-  Fetch a random high-res (3840px+ preferred) Unsplash photo, save it
-  into $WALLPAPER_DIR — named from your query plus the photo's own
-  description — then apply it (desktop + pywal + kitty).
+  Fetch an Unsplash photo, save it into $WALLPAPER_DIR — named from your
+  query plus the photo's own description — then apply it (desktop +
+  pywal + kitty). Always downloads the RAW original rendition (the
+  highest quality Unsplash serves), preferring 3840px+ photos on search.
 
-  The query needs no quotes. No query = fully random. Needs
-  UNSPLASH_ACCESS_KEY or the 'unsplash-access-key' Keychain item
-  (see scripts/README.md).
+  A query needs no quotes; no query = fully random. Pasting a photo page
+  link (unsplash.com/photos/…) fetches exactly that photo instead of
+  searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
+  Keychain item (see scripts/README.md).
 
   Examples:
     theme unsplash                     # surprise me
     theme unsplash neon city rain
     theme unsplash mountain lake sunrise --rotate right
+    theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
 EOF
         ;;
     url) cat <<EOF

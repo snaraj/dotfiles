@@ -32,6 +32,7 @@ theme static             # static kitty theme (default: catppuccin-mocha)
 theme static <name>      # any file in ~/.config/kitty/themes/<name>.conf
 theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
+theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
 theme … --rotate left|right   # any image command: turn 90° before applying
 theme … --extend[=RRGGBB]     # pad flat-background art to screen shape (default 000000)
@@ -62,6 +63,9 @@ theme static catppuccin-mocha
 theme unsplash
 theme unsplash "misty forest"
 theme unsplash "brutalist architecture"
+
+# Or exactly the photo you are looking at — paste its page link
+theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
 
 # Any direct image URL
 theme url https://upload.wikimedia.org/wikipedia/commons/1/12/Andromeda.jpg
@@ -99,6 +103,9 @@ checks before anything is applied:
    existing file is never modified.
 4. **Warns when small.** Anything narrower than 2560px is saved and applied,
    but says so.
+5. **Highest rendition wins.** Unsplash downloads use the `raw` URL — the
+   untouched original upload — never the `full` q=85 re-compressed jpg;
+   Pinterest `/NNNx/` downscales are upgraded to `/originals/` when it exists.
 
 Pinterest specifically: pin pages expose only a `736x`-wide preview in their
 `og:image`. `theme` rewrites any `i.pinimg.com/<width>x/...` downscale —
@@ -234,6 +241,7 @@ Required:
 | --- | --- | --- |
 | `wallpaper` | `brew install wallpaper` | Setting the macOS desktop image |
 | `wal` (pywal) | `pipx install pywal` | Deriving the palette from an image |
+| `colorz`, `modern_colorthief` | `pipx inject pywal colorz modern_colorthief` | pywal backends — colorz first; modern_colorthief handles near-monochrome art colorz refuses |
 | `curl` | preinstalled | All downloads |
 | `python3` | preinstalled (or `brew install python`) | Parsing Unsplash JSON and `og:` meta tags |
 | `file`, `sed`, `awk`, `find`, `shasum` | preinstalled | Typing, slugifying, dedupe |
