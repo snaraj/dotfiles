@@ -1055,26 +1055,31 @@ usage() {
     printf '  os:                 %s\n' "$os"
     cat <<EOF
 
-  theme random           random wallpaper from the configured wallpaper folder
-  theme set <image>      specific local wallpaper (path, or name under the wallpaper dir)
-  theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
-                         (multi-word queries work bare: theme unsplash neon city rain;
-                          paste an unsplash.com/photos/… link for exactly that photo)
-  theme unsplash status  Unsplash API usage: requests left this hour, key, tier
-  theme url <link>       direct image URL or Pinterest pin: download, save, apply
-                         (pinimg /NNNx/ downscales auto-upgrade to /originals/)
-  theme list [-v]        wallpaper table, latest first: title + colorscheme;
-                         -v adds source, format, size, date added
-  theme preview [name]   one wallpaper up close: larger picture + colorscheme,
-                         title, location (current wallpaper if no name)
-  theme status           current theme, color-scheme swatches, variables
-  theme rename <w> <n…>  rename a saved wallpaper, keeping the naming format
-  theme rm <w…>          delete saved wallpapers by name (no path needed)
-  theme help             this text  (theme <command> --help = per-command help)
+Apply Commands:
+  set             apply a specific local wallpaper (path, or name in the wallpaper folder)
+  random          random wallpaper from the configured wallpaper folder
+  unsplash        fetch a random high-res Unsplash photo, save it, apply it
+  url             download a direct image URL or Pinterest pin, save it, apply it
 
-global flags (any image command):
+Library Commands:
+  list            wallpaper table: title + colorscheme (-v adds source, format, size, date)
+  preview         one wallpaper up close: picture, colorscheme, title, location
+  rename          rename a saved wallpaper, keeping the naming format
+  rm              delete saved wallpapers by name
+
+Info Commands:
+  status          current theme, color-scheme swatches, variables
+  unsplash status Unsplash API usage: requests left this hour, key, tier
+  help            this text
+
+Usage:
+  theme <command> [flags]
+
+Global Flags (any image command):
   --rotate left|right    turn the image 90° before applying
   --extend[=RRGGBB]      centre flat art on a matching canvas (default 000000)
+
+Use "theme <command> --help" for more information about a given command.
 EOF
 }
 
