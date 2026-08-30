@@ -20,8 +20,15 @@ dry() { [ -n "${THEME_NO_APPLY:-}" ]; }
 # --- small utilities -------------------------------------------------------
 
 slugify() {
-    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' |
-        sed -e 's/[^a-z0-9][^a-z0-9]*/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-64 | sed 's/-$//'
+    local s
+    s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' |
+        sed -e 's/[^a-z0-9][^a-z0-9]*/-/g' -e 's/^-//' -e 's/-$//')
+    # Cap long names at a WORD boundary — never a mid-word chop like "at-s".
+    if [ "${#s}" -gt 72 ]; then
+        s=$(printf '%.72s' "$s")
+        s="${s%-*}"
+    fi
+    printf '%s' "$s"
 }
 
 hash_of() { { shasum -a 256 || sha256sum; } <"$1" 2>/dev/null | cut -d' ' -f1; }
@@ -198,9 +205,15 @@ d = d if isinstance(d, list) else [d]
 if not d: sys.exit(1)
 best = max([p for p in d if p.get("width", 0) >= 3840] or d, key=lambda p: p.get("width", 0))
 u = best.get("urls", {})
+# The filename hint: prefer the human description ("a city street at night");
+# an Unsplash slug carries the 11-char photo id as its last token — strip it.
+import re
+name = best.get("alt_description") or best.get("description") or ""
+if not name:
+    name = re.sub(r"-[A-Za-z0-9_-]{11}$", "", best.get("slug") or "") or best.get("id") or "photo"
 print("\t".join(str(x) for x in (
     u.get("full") or u.get("raw", ""), best.get("width", 0), best.get("height", 0),
-    best.get("slug") or best.get("alt_description") or best.get("description") or best.get("id", "photo"),
+    name,
     (best.get("links") or {}).get("download_location", ""),
     (best.get("user") or {}).get("name", ""))))
 '
@@ -229,7 +242,10 @@ cmd_unsplash() {
     curl -fsL --max-time 90 -A "$UA" -o "$tmp" "$img_url" || die "photo download failed"
     local mime; mime=$(file -b --mime-type "$tmp")
     case "$mime" in image/*) ;; *) die "Unsplash served $mime, not an image" ;; esac
-    save_wallpaper "$tmp" "$mime" "${slug}${who:+-by-$who}"
+    # Name = your search prompt (when given) + the photo's own description —
+    # a wallpaper you can find again, not a slug with an id tail. The
+    # photographer is credited in the terminal note, not the filename.
+    save_wallpaper "$tmp" "$mime" "${1:+$1 }$slug"
     # Unsplash API guideline: report the download so the photographer is credited.
     [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
         curl -fs --max-time 15 -K - -o /dev/null "$dl" 2>/dev/null
@@ -303,7 +319,8 @@ theme — wallpaper + terminal palette
   theme random           random local wallpaper: desktop + pywal
   theme set <image>      specific local wallpaper (path, or name under the wallpaper dir)
   theme static [name]    fixed kitty theme (default catppuccin-mocha)
-  theme unsplash [query] fetch a random high-res Unsplash photo, save it, apply it
+  theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
+                         (multi-word queries work bare: theme unsplash neon city rain)
   theme url <link>       direct image URL or Pinterest pin: download, save, apply
   theme list             local wallpapers and static themes
   theme status           current mode, wallpaper, and palette source
@@ -314,7 +331,66 @@ docs: $CONFIG_DIR/scripts/README.md
 EOF
 }
 
+# Per-subcommand help for `theme <cmd> --help`.
+usage_cmd() {
+    case "$1" in
+    wal) cat <<EOF
+theme wal [image]
+
+  Derive a pywal palette from a local image and apply it everywhere:
+  desktop wallpaper + kitty recolor (live windows and future ones).
+  [image] is a path or a name under $WALLPAPER_DIR (extension optional).
+  No image = a random local wallpaper.
+EOF
+        ;;
+    random) printf 'theme random\n\n  Same as `theme wal` with no image: random local wallpaper, applied.\n' ;;
+    set) cat <<EOF
+theme set <image>
+
+  Apply a specific local wallpaper: desktop + pywal palette + kitty.
+  <image> is a path or a name under $WALLPAPER_DIR (extension optional).
+EOF
+        ;;
+    static) cat <<EOF
+theme static [name]
+
+  Switch kitty to a fixed theme from $THEMES_DIR (no pywal, wallpaper
+  untouched). Default: catppuccin-mocha. Available: $(static_themes | paste -sd' ' -)
+EOF
+        ;;
+    unsplash) cat <<EOF
+theme unsplash [query…]
+
+  Fetch a random high-res (3840px+ preferred) Unsplash photo, save it
+  into $WALLPAPER_DIR — named from your query plus the photo's own
+  description — then apply it (desktop + pywal + kitty).
+
+  The query needs no quotes:  theme unsplash neon city rain
+  No query = fully random. Needs UNSPLASH_ACCESS_KEY or the
+  'unsplash-access-key' Keychain item (see scripts/README.md).
+EOF
+        ;;
+    url) cat <<EOF
+theme url <link>
+
+  Download an image from a direct URL or a Pinterest pin page, save it
+  into $WALLPAPER_DIR, then apply it (desktop + pywal + kitty).
+EOF
+        ;;
+    list) printf 'theme list\n\n  List local wallpapers and static kitty themes.\n' ;;
+    status) printf 'theme status\n\n  Show current mode (pywal/static), wallpaper, and palette source.\n' ;;
+    *) usage ;;
+    esac
+}
+
 # --- dispatch --------------------------------------------------------------
+
+# `theme <cmd> --help` means help for THAT command, never an argument — and no
+# subcommand takes flags, so any other leading dash is a mistake to refuse.
+case "${2:-}" in
+-h | --help) usage_cmd "${1:-}"; exit 0 ;;
+-*) usage >&2; die "unknown option '${2}' for 'theme ${1}'" ;;
+esac
 
 case "${1:-help}" in
 wal) cmd_local "${2:-}" ;;
@@ -332,7 +408,7 @@ static)
     fi
     note "static theme '$name'"
     ;;
-unsplash) cmd_unsplash "${2:-}" ;;
+unsplash) shift; cmd_unsplash "$*" ;;
 url) cmd_url "${2:-}" ;;
 list) cmd_list ;;
 status) cmd_status ;;
