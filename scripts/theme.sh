@@ -213,7 +213,7 @@ set_desktop() {
 }
 
 set_palette() {
-    dry && { note "[no-apply] would derive a pywal palette from $1"; return 0; }
+    dry && { note "[no-apply] would derive a palette from $1"; return 0; }
     command -v wal >/dev/null 2>&1 || die "pywal not installed (pipx install pywal)"
     # colorz refuses near-monochrome art ("not enough colors");
     # modern_colorthief (pipx inject pywal modern_colorthief) handles those.
@@ -558,7 +558,7 @@ cmd_status() {
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
     case "$inc" in
     "") mode="unset" ;;
-    *colors-kitty.conf) mode="pywal" ;;
+    *colors-kitty.conf) mode="derived from wallpaper" ;;
     *) mode="$(basename "${inc%.conf}")" ;;
     esac
     current=$(cat "$WAL_CACHE/wal" 2>/dev/null)
@@ -575,7 +575,7 @@ cmd_status() {
         printf 'color scheme:    <none>\n'
     fi
     printf 'palette source:  %s\n' "${inc:-<none>}"
-    printf 'pywal image:     %s%s\n' "${current:-<none>}" \
+    printf 'palette image:   %s%s\n' "${current:-<none>}" \
         "$( [ -n "$current" ] && [ -f "$current" ] && printf ' (%s)' "$(img_size "$current")")"
     printf 'wallpaper dir:   %s (%s images)\n' "$WALLPAPER_DIR" \
         "$(find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null | wc -l | tr -d ' ')"
@@ -664,12 +664,11 @@ cmd_rename() {
 
 usage() {
     local desk inc label colors term os
-    printf 'theme allows you to control your terminal theme and your wallpaper all from one place.\n\n'
     desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
     case "$inc" in
     "") label="" ;;
-    *colors-kitty.conf) label="pywal" ;;
+    *colors-kitty.conf) label="" ;;
     *) label="$(basename "${inc%.conf}")" ;;
     esac
     printf '  current theme:      %s\n' "${desk:-<none>}"
@@ -678,12 +677,17 @@ usage() {
         printf '  colorscheme:        '
         # shellcheck disable=SC2046
         swatch_row $(printf '%s\n' "$colors" | head -8)
-        printf ' %s\n' "$label"
+        printf '%s\n' "${label:+ $label}"
     else
         printf '  colorscheme:        <none>\n'
     fi
-    term="${KITTY_WINDOW_ID:+kitty 🐱}"
-    printf '  terminal provider:  %s\n' "${term:-${TERM_PROGRAM:-$TERM}}"
+    # In kitty the name is an OSC 8 hyperlink to its website.
+    if [ -n "${KITTY_WINDOW_ID:-}" ]; then
+        term=$(printf '\033]8;;https://sw.kovidgoyal.net/kitty/\akitty\033]8;;\a')
+    else
+        term="${TERM_PROGRAM:-$TERM}"
+    fi
+    printf '  terminal:           %s\n' "$term"
     if [ "$(uname -s)" = Darwin ]; then
         os="macOS $(sw_vers -productVersion 2>/dev/null) ($(uname -m))"
     else
@@ -692,8 +696,8 @@ usage() {
     printf '  os:                 %s\n' "$os"
     cat <<EOF
 
-  theme wal [image]      pywal colors + desktop from a local image (random if omitted)
-  theme random           random local wallpaper: desktop + pywal
+  theme wal [image]      palette + desktop from a local image (random if omitted)
+  theme random           random local wallpaper: desktop + palette
   theme set <image>      specific local wallpaper (path, or name under the wallpaper dir)
   theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
                          (multi-word queries work bare: theme unsplash neon city rain;
@@ -708,12 +712,9 @@ usage() {
   theme rm <w…>          delete saved wallpapers by name (no path needed)
   theme help             this text  (theme <command> --help = per-command help)
 
-  --rotate left|right    turn the image 90° first (any image command) — portrait
-                         pins become landscape; desktop is set in fill mode
-                         (crop to cover, never letterbox bars)
-  --extend[=RRGGBB]      centre the design and grow the canvas to the screen's
-                         shape in a solid color (default 000000) — for art on a
-                         flat background: no crop, no zoom, no visible seams
+global flags (any image command):
+  --rotate left|right    turn the image 90° before applying
+  --extend[=RRGGBB]      centre flat art on a matching canvas (default 000000)
 EOF
 }
 
@@ -723,7 +724,7 @@ usage_cmd() {
     wal) cat <<EOF
 theme wal [image] [--rotate left|right] [--extend[=RRGGBB]]
 
-  Derive a pywal palette from a local image and apply it everywhere:
+  Derive a color palette from a local image and apply it everywhere:
   desktop wallpaper + kitty recolor (live windows and future ones).
   [image] is a path or a name under $WALLPAPER_DIR (extension optional).
   No image = a random local wallpaper.
@@ -746,7 +747,7 @@ EOF
     set) cat <<EOF
 theme set <image> [--rotate left|right] [--extend[=RRGGBB]]
 
-  Apply a specific local wallpaper: desktop + pywal palette + kitty.
+  Apply a specific local wallpaper: desktop + palette + kitty.
   <image> is a path or a name under $WALLPAPER_DIR (extension optional).
 
   Examples:
@@ -759,7 +760,7 @@ theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
 
   Fetch an Unsplash photo, save it into $WALLPAPER_DIR — named from your
   query plus the photo's own description — then apply it (desktop +
-  pywal + kitty). Always downloads the RAW original rendition (the
+  palette + kitty). Always downloads the RAW original rendition (the
   highest quality Unsplash serves), preferring 3840px+ photos on search.
 
   A query needs no quotes; no query = fully random. Pasting a photo page
@@ -782,7 +783,7 @@ EOF
 theme url <link> [--rotate left|right]
 
   Download an image from a direct URL or a Pinterest pin page, save it
-  into $WALLPAPER_DIR, then apply it (desktop + pywal + kitty).
+  into $WALLPAPER_DIR, then apply it (desktop + palette + kitty).
 
   Sharpness: direct i.pinimg.com /NNNx/ downscales are auto-upgraded to
   the full-resolution /originals/ variant when it exists, and the desktop
@@ -816,7 +817,7 @@ theme status
   Show the current theme: wallpaper path, mode, the color
   scheme as truecolor swatches (like nvim/kitty theme pickers), palette
   source, and the variables the CLI reads (Unsplash key presence — never
-  the value — wallpaper dir, pywal cache).
+  the value — wallpaper dir, palette cache).
 
   Example:
     theme status
