@@ -379,7 +379,13 @@ EOF
         ;;
     list) printf 'theme list\n\n  List local wallpapers and static kitty themes.\n' ;;
     status) printf 'theme status\n\n  Show current mode (pywal/static), wallpaper, and palette source.\n' ;;
-    *) usage ;;
+    help | '') usage ;;
+    *)
+        # A typo like `theme unplash --help` should SAY so, not silently
+        # answer with the global usage as if the command existed.
+        printf 'theme: unknown command %s — full usage:\n\n' "'$1'" >&2
+        usage
+        ;;
     esac
 }
 
