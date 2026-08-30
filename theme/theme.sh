@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # theme — desktop wallpaper + terminal palette CLI (pywal).
-# Full documentation: ~/.config/scripts/README.md
+# Full documentation: ~/.config/theme/README.md
 # Set THEME_NO_APPLY=1 to exercise every code path without touching the desktop.
 
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config}"
@@ -236,6 +236,20 @@ use_image() {
 
 # --- local wallpapers ------------------------------------------------------
 
+# A title copied from `theme list` may be TRUNCATED (trailing … or cut
+# mid-word). Resolve it anyway when it is the prefix of exactly ONE library
+# file; zero or several matches fail — never a guess between candidates.
+prefix_match() { # $1 name-or-prefix
+    local p="${1%…}" f hit="" n=0
+    p="${p%...}"
+    [ -n "$p" ] || return 1
+    for f in "$WALLPAPER_DIR/$p"*; do
+        [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
+    done
+    [ "$n" -eq 1 ] || return 1
+    printf '%s' "$hit"
+}
+
 resolve_local() {
     local f
     [ -f "$1" ] && { printf '%s' "$1"; return 0; }
@@ -243,6 +257,7 @@ resolve_local() {
     for f in "$WALLPAPER_DIR/$1".*; do
         [ -f "$f" ] && { printf '%s' "$f"; return 0; }
     done
+    f=$(prefix_match "$1") && { printf '%s' "$f"; return 0; }
     return 1
 }
 
@@ -254,7 +269,7 @@ random_local() {
 cmd_local() { # $1 = image argument, or empty for a random pick
     local img mime
     if [ -n "$1" ]; then
-        img=$(resolve_local "$1") || die "no such wallpaper '$1' (looked in $WALLPAPER_DIR)"
+        img=$(resolve_local "$1") || die "no wallpaper uniquely matching '$1' (looked in $WALLPAPER_DIR; a truncated name from theme list works when only one wallpaper starts with it)"
     else
         img=$(random_local)
         [ -n "$img" ] || die "no images found in $WALLPAPER_DIR"
@@ -516,26 +531,40 @@ wall_source() { # $1 file
 }
 
 # The first 8 palette colors a wallpaper DERIVED when it was last applied,
-# read from pywal's own scheme cache (path-mangled filename, any backend) in
-# $WAL_CACHE/schemes — already outside the repo, so the render is a small
-# JSON read per file, never an image reprocess. hex without '#', one per
-# line. A wallpaper never applied has no cached scheme: the caller renders an
-# honest dash rather than computing one at list time.
+# read from pywal's own scheme cache in $WAL_CACHE/schemes — already outside
+# the repo, so the render is a small JSON read per file, never an image
+# reprocess. hex without '#', one per line. A wallpaper never applied has no
+# cached scheme: the caller renders an honest dash rather than computing one.
 wall_scheme() { # $1 file
-    local m s newest=""
-    m=$(printf '%s' "$1" | tr '/.' '__')
-    # The cached name is <mangled-path>_<light|dark>_<backend>_…json. Matching
-    # the mode token too is not decoration: a bare `${m}_*` also matches the
-    # cache of ANY wallpaper whose mangled name EXTENDS this one (`sky.jpg`
-    # would match `sky_jpg_x.png`'s entry), and a newer neighbour would then
-    # render as this row's scheme. Globbing in the shell — not `ls -t | head`
-    # — because that pipeline reads a filename it cannot quote and needs a
-    # ShellCheck exemption to say so; `-nt` picks the newest (latest backend)
-    # with no assumption about the characters in the name at all.
-    for s in "$WAL_CACHE/schemes/${m}"_dark_*.json "$WAL_CACHE/schemes/${m}"_light_*.json; do
+    local s newest=""
+    # OWNERSHIP IS THE WHOLE PROBLEM here, and the cache FILENAME cannot
+    # establish it. pywal names a cache file after the wallpaper path with '/'
+    # and '.' both collapsed to '_' — a lossy, non-injective mangling — then
+    # appends mode, backend, alpha, size and version tokens joined by that same
+    # '_'. Three demonstrated ways a filename-shaped lookup gets it wrong:
+    #   * `sky.jpg` and `sky_jpg_x.png` mangle to `sky_jpg` and `sky_jpg_x_png`,
+    #     so a `sky_jpg_*` glob matches the neighbour's entry;
+    #   * requiring the mode token does not repair that, because a NAME may
+    #     contain it: `sky.jpg_dark_x.png` mangles to `sky_jpg_dark_x_png`,
+    #     which `sky_jpg_dark_*` still matches;
+    #   * and the mangling itself collides — `a.b.jpg` and `a_b.jpg` both
+    #     mangle to `a_b_jpg`, so even an EXACT filename match is not ownership.
+    # pywal records the absolute source path INSIDE the file, as `"wallpaper"`,
+    # and that is the collision-free key. Match it literally with both quotes,
+    # so one recorded path can be neither a prefix nor an extension of another.
+    # A name the JSON has to escape (a quote or a backslash) is not provable by
+    # a literal match, so it finds nothing and renders the dash — unknown is a
+    # dash here, never a guess.
+    case "$1" in *'"'* | *\\*) return 1 ;; esac
+    # One grep over the cache directory per wallpaper, not one per PAIR: `-l`
+    # names the owning files and `-nt` picks the newest of them (the latest
+    # backend). The `-f` guard is what makes reading line-delimited names safe
+    # — the only name it could split is one containing a newline, and a split
+    # name is not a file, so that candidate is dropped rather than half-read.
+    while IFS= read -r s; do
         [ -f "$s" ] || continue
         if [ -z "$newest" ] || [ "$s" -nt "$newest" ]; then newest="$s"; fi
-    done
+    done < <(grep -lF -- "\"wallpaper\": \"$1\"" "$WAL_CACHE"/schemes/*.json 2>/dev/null)
     [ -n "$newest" ] || return 1
     # Exactly six hex digits, so a truncated or corrupt cache entry is simply
     # not a color here rather than an arithmetic error inside the caller's
@@ -545,20 +574,63 @@ wall_scheme() { # $1 file
         sed -n 's/.*"color[0-9]": *"#\([0-9a-fA-F]\{6\}\)".*/\1/p' | head -8
 }
 
+# A tiny inline picture preview for `list -v`, via kitty's graphics protocol
+# in unicode-placeholder mode: icat transmits a downscaled image and emits
+# placeholder cells that flow with text. icat's own output positions
+# absolutely (meant for preview panes), so we strip the cursor choreography
+# and re-emit just the transmission plus each line of cells, re-applying the
+# image-id color per line. Sets PV_APC (transmit once), PV1/PV2 (one line of
+# cells each, color-wrapped), PV_W (cell width). kitty-only by its nature.
+PREVIEW_COLS=7
+wall_preview() { # $1 file
+    [ -n "${KITTY_WINDOW_ID:-}" ] || return 1
+    command -v kitten >/dev/null 2>&1 || return 1
+    local out rest color rows w pad
+    out=$(kitten icat --unicode-placeholder --transfer-mode=file --stdin=no \
+        --use-window-size 100,50,2000,1000 \
+        --place="${PREVIEW_COLS}x2@0x0" "$1" 2>/dev/null) || return 1
+    case "$out" in *$'\e\\'*) ;; *) return 1 ;; esac
+    PV_APC="${out%%$'\e\\'*}"$'\e\\'
+    PV_APC="${PV_APC#$'\r'}"
+    rest="${out#*$'\e\\'}"
+    color=$(printf '%s' "$rest" | grep -o $'\e\[38[:;][0-9:;]*m' | head -1)
+    rows=$(printf '%s' "$rest" | sed $'s/\e7//g; s/\e8//g; s/\e\[[0-9;]*H//g; s/\r//g; s/\e\[[0-9]*C//g; s/\e\[39m//g; s/\e\[38[:;][0-9:;]*m//g')
+    PV1=$(printf '%s' "$rows" | sed -n 1p)
+    PV2=$(printf '%s' "$rows" | sed -n 2p)
+    [ -n "$PV1" ] || return 1
+    w=$(printf '%s' "$PV_APC" | sed -n 's/.*[,;]c=\([0-9]*\).*/\1/p')
+    case "$w" in '' | *[!0-9]*) w=$PREVIEW_COLS ;; esac
+    pad=$((PREVIEW_COLS - w))
+    [ "$pad" -gt 0 ] && {
+        PV1="$PV1$(printf '%*s' "$pad" '')"
+        PV2="${PV2}$(printf '%*s' "$pad" '')"
+    }
+    PV1="${color}${PV1}"$'\e[39m'
+    PV2="${color}${PV2}"$'\e[39m'
+    return 0
+}
+
 # Wallpapers as a table, LATEST ADDED first (APFS birth time): truncated
 # title plus a small render of the scheme that wallpaper derives — snappy,
 # because the scheme comes from pywal's cache, not the image. Source (an
-# xattr/mdls read per file), format, size, and date all live behind -v, so
-# the default listing does no per-file metadata work and stays instant.
+# xattr/mdls read per file), format, size, date, and the inline picture
+# preview all live behind -v, so the default listing does no per-file
+# metadata work and stays instant.
 cmd_list() {
     local cols namew f name src fmt bytes added c r g b n
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
-    if [ -n "$VERBOSE" ]; then namew=$((cols - 71)); else namew=$((cols - 32)); fi
+    local pvok="" pvw=0
+    [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && pvok=1
+    # The preview column's width as a NUMBER, not a substitution: `$((cols - 71
+    # - ${pvok:+9}))` expands to `cols - 71 - ` whenever previews are off, which
+    # is an arithmetic syntax error, so `list -v` died outside kitty entirely.
+    [ -n "$pvok" ] && pvw=9
+    if [ -n "$VERBOSE" ]; then namew=$((cols - 71 - pvw)); else namew=$((cols - 32)); fi
     [ "$namew" -gt 44 ] && namew=44
     [ "$namew" -lt 16 ] && namew=16
-    printf 'wallpapers (%s), latest first:\n\n' "$WALLPAPER_DIR"
+    printf 'wallpapers\n\n'
     if [ -n "$VERBOSE" ]; then
-        printf '  %-*s  %-24s  %-10s  %-6s  %-7s  %s\n' "$namew" TITLE COLORSCHEME SOURCE FORMAT SIZE ADDED
+        printf '  %s%-*s  %-24s  %-10s  %-6s  %-7s  %s\n' "${pvok:+$(printf '%-9s' PICTURE)}" "$namew" TITLE COLORSCHEME SOURCE FORMAT SIZE ADDED
     else
         printf '  %-*s  %s\n' "$namew" TITLE COLORSCHEME
     fi
@@ -570,6 +642,13 @@ cmd_list() {
             name=$(basename "$f")
             name="${name%.*}"
             [ "${#name}" -gt "$namew" ] && name="$(printf '%.*s' $((namew - 1)) "$name")…"
+            PV_APC=""; PV1=""; PV2=""
+            if [ -n "$pvok" ] && wall_preview "$f"; then
+                printf '%s' "$PV_APC"
+                printf '  %s' "$PV1"
+            elif [ -n "$pvok" ]; then
+                printf '  %-7s' ''
+            fi
             printf '  %-*s  ' "$namew" "$name"
             # 8 swatches of 2 cells + a trailing space = exactly 24 columns of
             # visible width, so the -v columns after stay aligned; a wallpaper
@@ -591,6 +670,8 @@ cmd_list() {
                 printf '  %-10s  %-6s  %-7s  %s' "$src" "$fmt" "$bytes" "$added"
             fi
             printf '\n'
+            # Second line of the picture preview, when one rendered.
+            if [ -n "$PV2" ]; then printf '  %s\n' "$PV2"; fi
         done
 }
 
@@ -674,6 +755,9 @@ resolve_library() {
             [ -f "$f" ] && { cand="$f"; break; }
         done
     fi
+    # Truncated copy-paste from `theme list`: unique prefix only, and the
+    # canonical containment check below still applies to whatever it found.
+    [ -n "$cand" ] || cand=$(prefix_match "$1") || return 1
     [ -n "$cand" ] || return 1
     dirreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) || return 1
     real=$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P) || return 1
@@ -832,7 +916,7 @@ theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
   A query needs no quotes; no query = fully random. Pasting a photo page
   link (unsplash.com/photos/…) fetches exactly that photo instead of
   searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
-  Keychain item (see scripts/README.md).
+  Keychain item (see README.md).
 
   theme unsplash status shows the API window for your key — requests
   left this hour, tier, key source. The check itself costs 1 request.
@@ -870,10 +954,14 @@ theme list [-v]
   (truncated to the terminal) and a small render of the colorscheme
   that wallpaper derived when it was last applied (from the palette
   cache — a wallpaper never applied shows "-", nothing is computed at
-  list time, so the listing stays instant). -v adds source — the site
-  it came from (unsplash, pinterest, reddit, …), recorded at download
+  list time, so the listing stays instant). -v adds a small picture
+  preview (kitty graphics; in kitty only) plus source — the site it
+  came from (unsplash, pinterest, reddit, …), recorded at download
   time or read from macOS download metadata, "-" when unknown —
-  plus format, size, and date added.
+  format, size, and date added.
+
+  A truncated title copied from the table (with or without the …)
+  works in set/rename/rm when only one wallpaper starts with it.
 
   Examples:
     theme list

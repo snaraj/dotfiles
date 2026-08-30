@@ -20,9 +20,13 @@
 #     download endpoint exactly once and nowhere else (the NUL transport),
 #     an assertion no key-absence check can satisfy for it;
 #   - `theme list`'s colorscheme column reports the palette cache and never
-#     guesses: it cannot borrow a name-extending neighbour's cached scheme,
-#     an unapplied wallpaper renders a dash rather than invented colors, and
-#     a corrupt cache entry degrades to that same dash with a silent stderr.
+#     guesses. A cache file is NAMED by a lossy mangling of the wallpaper path
+#     ('/' and '.' both become '_'), so its name cannot establish ownership:
+#     each way that fails gets its own target here — a plain name extension,
+#     an extension beginning `_dark_`, one beginning `_light_`, and two
+#     wallpapers whose mangled names are byte-identical, in both mtime orders.
+#     An unapplied wallpaper renders a dash rather than invented colors, and a
+#     corrupt entry degrades to that same dash with a silent stderr.
 # Runs entirely in a throwaway directory; exits 0 on pass.
 set -u
 THEME="$(cd "$(dirname "$0")" && pwd)/theme.sh"
@@ -209,52 +213,127 @@ else pass "non-api download_location never receives the key"; fi
 unset STUB_DL
 
 # --- `theme list` colorscheme column: reports the cache, never guesses ------
-# The column claims "the scheme THIS wallpaper derived". Three ways that claim
-# can quietly become false, each pinned: borrowing a neighbour's cache entry,
-# inventing colors for a wallpaper that was never applied, and mangling a
-# corrupt entry into an arithmetic error instead of a dash.
+# The column claims "the scheme THIS wallpaper derived", and pywal's cache
+# FILENAME cannot back that claim: it is the wallpaper path with '/' and '.'
+# both collapsed to '_', then extended with mode/backend/size tokens joined by
+# that same '_'. Each way a filename-shaped lookup gets ownership wrong gets
+# its OWN target below — a plain name extension, an extension beginning with
+# the dark delimiter, one beginning with the light delimiter, and two
+# wallpapers whose mangled names are byte-identical — so no single case can
+# mask another, and every one of them has an input that turns it red.
 walcache="$fixture/wal"
 mkdir -p "$walcache/schemes"
 mangle() { printf '%s' "$1" | tr '/.' '__'; }
-# A minimal pywal scheme file. color0 is the caller-chosen probe; color10 must
-# never be read as color1, and color8/color9 must fall outside the first eight.
-scheme_json() { # $1 destination, $2 color0 hex
-    printf '{"checksum":"x","colors":{"color0":"#%s","color1":"#111111","color2":"#222222","color3":"#333333","color4":"#444444","color5":"#555555","color6":"#666666","color7":"#777777","color8":"#888888","color10":"#aaaaaa"}}\n' \
-        "$2" >"$1"
+# A minimal pywal scheme file: NAMED with the lossy mangling, and RECORDING the
+# wallpaper it belongs to exactly as pywal does. color0 is the caller's probe;
+# color10 must never be read as color1, and color8 must fall outside the first
+# eight.
+scheme_json() { # $1 owning wallpaper, $2 color0 hex, $3 mode, $4 size token, $5 mtime
+    local dest
+    dest="$walcache/schemes/$(mangle "$1")_$3_colorz_None_$4_2.0.0.json"
+    printf '{\n    "checksum": "x",\n    "wallpaper": "%s",\n    "alpha": "100",\n    "colors": {"color0": "#%s", "color1": "#111111", "color2": "#222222", "color3": "#333333", "color4": "#444444", "color5": "#555555", "color6": "#666666", "color7": "#777777", "color8": "#888888", "color10": "#aaaaaa"}\n}\n' \
+        "$1" "$2" >"$dest"
+    touch -t "$5" "$dest"
 }
-printf 'x' >"$lib/scheme-hit.jpg"
-printf 'x' >"$lib/scheme-hit_jpg_x.png"
-printf 'x' >"$lib/scheme-miss.jpg"
-printf 'x' >"$lib/scheme-bad.jpg"
-scheme_json "$walcache/schemes/$(mangle "$lib/scheme-hit.jpg")_dark_colorz_None_1_2.0.0.json" 010203
-# The neighbour's mangled name EXTENDS scheme-hit's, and is deliberately the
-# NEWER file: a `${mangled}_*` glob picks it, and scheme-hit's row would render
-# a scheme it never derived. `touch -t` instead of a sleep keeps this exact.
-scheme_json "$walcache/schemes/$(mangle "$lib/scheme-hit_jpg_x.png")_dark_colorz_None_1_2.0.0.json" 0a0b0c
-# Truncated hex in every slot: under a `[0-9a-fA-F]*` capture these all match,
-# and the caller's `$((16#${c:4:2}))` then evaluates `16#` — a bash arithmetic
-# error per color, on stderr, in the middle of a table.
-printf '{"colors":{"color0":"#0102","color1":"#3","color2":"#","color3":"#12345"}}\n' \
+for w in hit-plain.jpg hit-plain_jpg_x.png hit-dark.jpg hit-dark.jpg_dark_x.png \
+    hit-light.jpg hit-light.jpg_light_y.png collide.a.jpg collide_a.jpg \
+    dup.b.jpg dup_b.jpg scheme-miss.jpg scheme-bad.jpg; do
+    printf 'x' >"$lib/$w"
+done
+# Every target is deliberately the OLDEST of its pair, so "newest wins" alone
+# never lands on the right answer by accident. Every attacker RECORDS its own
+# path, and each of those paths begins with its target's path — which is why
+# the ownership match has to carry the closing quote.
+#
+# hit-plain: a plain mangled-name extension. `hit-plain_jpg` is a prefix of
+# `hit-plain_jpg_x_png`, so a bare `${mangled}_*` glob takes the attacker.
+scheme_json "$lib/hit-plain.jpg"            010203 dark  1 202001010000
+scheme_json "$lib/hit-plain_jpg_x.png"      0a0b0c dark  1 202601010000
+# hit-dark: the extension itself BEGINS with the dark delimiter —
+# `hit-dark_jpg_dark_x_png` — so requiring `_dark_` does not exclude it.
+scheme_json "$lib/hit-dark.jpg"             141516 dark  1 202001010000
+scheme_json "$lib/hit-dark.jpg_dark_x.png"  1e1f20 dark  1 202601010000
+# hit-light: the same trick through the light delimiter.
+scheme_json "$lib/hit-light.jpg"            282930 light 1 202001010000
+scheme_json "$lib/hit-light.jpg_light_y.png" 323334 light 1 202601010000
+# EXACT mangling collisions: '.'->'_' makes each of these pairs share one
+# mangled name, so no filename test whatsoever can tell the two apart. Distinct
+# size tokens only keep them from overwriting each other on disk. The pairs
+# carry OPPOSITE mtime orders on purpose — with one order only, whichever
+# wallpaper happened to own the newest entry would pass under a filename lookup
+# too, and its assertion would be decoration. Here each direction is the loser
+# of its own pair, so each has an input that turns it red.
+scheme_json "$lib/collide.a.jpg"            3c3d3e dark  1 202001010000
+scheme_json "$lib/collide_a.jpg"            464748 dark  2 202601010000
+scheme_json "$lib/dup.b.jpg"                505152 dark  1 202601010000
+scheme_json "$lib/dup_b.jpg"                5a5b5c dark  2 202001010000
+# Truncated hex in every slot, under a correctly-owned entry: the dash here
+# must come from the hex guard, not from a failed lookup. With a
+# [0-9a-fA-F]* capture these all match and the caller's $((16#${c:4:2}))
+# evaluates 16# — a bash arithmetic error per color, on stderr, mid-table.
+printf '{\n    "wallpaper": "%s",\n    "colors": {"color0": "#0102", "color1": "#3", "color2": "#", "color3": "#12345"}\n}\n' \
+    "$lib/scheme-bad.jpg" \
     >"$walcache/schemes/$(mangle "$lib/scheme-bad.jpg")_dark_colorz_None_1_2.0.0.json"
-touch -t 202001010000 "$walcache/schemes/$(mangle "$lib/scheme-hit.jpg")"_dark_*.json
-touch -t 202601010000 "$walcache/schemes/$(mangle "$lib/scheme-hit_jpg_x.png")"_dark_*.json
 
 listout="$fixture/list.out"; listerr="$fixture/list.err"
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
 run_list() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
     bash "$THEME" list >"$listout" 2>"$listerr"; }
-check  "list renders"                          0 run_list
-hitrow=$(grep '^  scheme-hit ' "$listout")
-if printf '%s' "$hitrow" | grep -q '48;2;1;2;3m'; then
-    pass "list shows the scheme a wallpaper derived"
-else fail "list did not render scheme-hit's own cached color0"; fi
-if printf '%s' "$hitrow" | grep -q '48;2;10;11;12m'; then
-    fail "list borrowed a name-extending neighbour's cached scheme"
-else pass "list never borrows a neighbour's cached scheme"; fi
-if grep '^  scheme-miss ' "$listout" | grep -q '48;2;'; then
+row() { grep "^  $1  *" "$listout"; }   # one listing row, by its exact title
+owns() { # $1 description, $2 title, $3 own rgb, $4 rgb it must never show
+    local r
+    r=$(row "$2")
+    if printf '%s' "$r" | grep -q "48;2;$3m" && ! printf '%s' "$r" | grep -q "48;2;$4m"; then
+        pass "$1"
+    else fail "$1 (row: own $3 missing, or borrowed $4)"; fi
+}
+check "list renders"                           0 run_list
+owns "a name-extending neighbour is not this wallpaper's scheme" \
+    'hit-plain' '1;2;3' '10;11;12'
+owns "a neighbour beginning _dark_ is not this wallpaper's scheme" \
+    'hit-dark' '20;21;22' '30;31;32'
+owns "a neighbour beginning _light_ is not this wallpaper's scheme" \
+    'hit-light' '40;41;48' '50;51;52'
+owns "dotted name keeps its own scheme under a mangling collision" \
+    'collide\.a' '60;61;62' '70;71;72'
+owns "underscored name keeps its own scheme under a mangling collision" \
+    'dup_b' '90;91;92' '80;81;82'
+# --- `list -v` must render in BOTH preview states ---------------------------
+# Previews need kitty AND `kitten`; the width maths for the extra column was
+# written as `$((cols - 71 - ${pvok:+9}))`, which expands to `cols - 71 - ` the
+# moment previews are off — an arithmetic syntax error, so verbose listing died
+# outright in every terminal that is not kitty. Both states are pinned here,
+# with a deterministic `kitten` stand-in that emits a placeholder payload
+# shaped like the real one and touches no graphics, no image and no terminal.
+cat >"$stubdir/kitten" <<'EOS'
+#!/bin/bash
+printf '\033_Gf=100,t=f,i=1,c=7,r=2;QUJD\033\\'
+printf '\033[38;5;1mPREVIEWA\n'
+printf '\033[38;5;1mPREVIEWB\n'
+exit 0
+EOS
+chmod +x "$stubdir/kitten"
+listvout="$fixture/listv.out"; listverr="$fixture/listv.err"
+pvout="$fixture/listpv.out"; pverr="$fixture/listpv.err"
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_listv() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    KITTY_WINDOW_ID='' bash "$THEME" list -v >"$listvout" 2>"$listverr"; }
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_listpv() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    KITTY_WINDOW_ID=1 PATH="$stubdir:$PATH" bash "$THEME" list -v >"$pvout" 2>"$pverr"; }
+check "verbose list renders without previews"  0 run_listv
+check "verbose list renders with previews"     0 run_listpv
+if [ -s "$listverr" ] || [ -s "$pverr" ]; then
+    fail "verbose list wrote to stderr"
+else pass "verbose list is silent on stderr in both states"; fi
+if grep -q 'PREVIEWA' "$pvout" && grep -q '^  .*PREVIEWB' "$pvout"; then
+    pass "a rendered preview occupies both of its row's lines"
+else fail "preview row did not render its two lines"; fi
+
+if row 'scheme-miss' | grep -q '48;2;'; then
     fail "an unapplied wallpaper was given invented colors"
 else pass "unapplied wallpaper lists an honest dash"; fi
-if grep '^  scheme-bad ' "$listout" | grep -q '48;2;' || [ -s "$listerr" ]; then
+if row 'scheme-bad' | grep -q '48;2;' || [ -s "$listerr" ]; then
     fail "a corrupt cache entry produced a swatch or an error"
 else pass "corrupt cache entry degrades to a dash, silently"; fi
 
