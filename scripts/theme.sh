@@ -459,6 +459,26 @@ cmd_status() {
     printf '  WAL_CACHE             %s\n' "$WAL_CACHE"
 }
 
+# Delete wallpapers by NAME (resolved like `set`/`rename` — no path needed).
+# Only files inside the library are deletable; `theme rm` never touches
+# arbitrary paths. Deleting the on-screen wallpaper is allowed — macOS keeps
+# its cached copy up until the next `theme` run.
+cmd_rm() {
+    local name img cur
+    cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+    for name in "$@"; do
+        img=$(resolve_local "$name") || die "no such wallpaper '$name' (looked in $WALLPAPER_DIR)"
+        case "$img" in
+        "$WALLPAPER_DIR"/*) ;;
+        *) die "'$name' resolves outside the wallpaper library ($img) — rm only deletes library files" ;;
+        esac
+        rm "$img" || die "could not delete $img"
+        note "successfully deleted \"$(basename "$img")\""
+        [ "$img" = "$cur" ] && note "that was the current wallpaper — pick a new one with theme wal / theme set"
+    done
+    return 0
+}
+
 # Rename a wallpaper, keeping the library's naming format (slug + original
 # extension). If it is the CURRENT wallpaper, the desktop is re-pointed so the
 # rename never breaks what is on screen.
@@ -502,6 +522,7 @@ theme — wallpaper + terminal palette
   theme list             local wallpapers and static themes
   theme status           current theme, color-scheme swatches, variables
   theme rename <w> <n…>  rename a saved wallpaper, keeping the naming format
+  theme rm <w…>          delete saved wallpapers by name (no path needed)
   theme help             this text  (theme <command> --help = per-command help)
 
   --rotate left|right    turn the image 90° first (any image command) — portrait
@@ -632,6 +653,18 @@ theme rename <wallpaper> <new name…>
     theme rename starry-boat-3840x2160-v0-uyzg0992aegb1 starry boat painting
 EOF
         ;;
+    rm) cat <<EOF
+theme rm <wallpaper…>
+
+  Delete saved wallpapers by name — resolved in $WALLPAPER_DIR like
+  \`set\`/\`rename\` (extension optional), so no path is needed. Only
+  library files can be deleted. Several names at once are fine.
+
+  Examples:
+    theme rm albedo-wings-black
+    theme rm old-one.jpg other-old-one
+EOF
+        ;;
     help | '') usage ;;
     *)
         # A typo like `theme unplash --help` should SAY so, not silently
@@ -701,6 +734,7 @@ url) cmd_url "${2:-}" ;;
 list) cmd_list ;;
 status) cmd_status ;;
 rename) shift; [ -n "${1:-}" ] || die "usage: theme rename <wallpaper> <new name…>"; cmd_rename "$@" ;;
+rm) shift; [ -n "${1:-}" ] || die "usage: theme rm <wallpaper…>"; cmd_rm "$@" ;;
 help | -h | --help) usage ;;
 *) die "unknown command '$1' — run 'theme help' for the list" ;;
 esac

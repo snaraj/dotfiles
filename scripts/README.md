@@ -38,6 +38,7 @@ theme … --extend[=RRGGBB]     # pad flat-background art to screen shape (defau
 theme list               # local wallpapers and static themes
 theme status             # current theme: mode, color-scheme swatches, variables
 theme rename <w> <n…>    # rename a saved wallpaper (slugified, extension kept)
+theme rm <w…>            # delete saved wallpapers by name (library only)
 ```
 
 `wal`, `random` and `set` are the same code path; `random`/`set` exist because
