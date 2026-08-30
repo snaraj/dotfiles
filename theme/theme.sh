@@ -32,6 +32,43 @@ slugify() {
 
 hash_of() { { shasum -a 256 || sha256sum; } <"$1" 2>/dev/null | cut -d' ' -f1; }
 
+# A filename is DATA from disk, never terminal protocol. macOS accepts every
+# byte but '/' and NUL in a name, so a wallpaper can be called
+# ESC ] 52 ; c ; <base64> BEL — and a terminal that receives those bytes
+# writes the user's clipboard instead of printing a title. Every
+# filesystem-derived value therefore gets a display copy with control bytes
+# removed. The OPERATIONAL path is never the sanitized string: what we open,
+# copy, move and delete stays byte-exact, so sanitizing can change what is
+# shown but never what is touched.
+display_text() { printf '%s' "$1" | tr -d '[:cntrl:]'; }
+
+# The lowercased hostname of an http(s) URL, or nothing. Userinfo is stripped
+# BEFORE the host is read, because the host of
+# `https://unsplash.com@evil.invalid/x` is evil.invalid; the port goes after.
+url_host() { # $1 url
+    local h=$1
+    case "$h" in
+    http://*) h=${h#http://} ;;
+    https://*) h=${h#https://} ;;
+    *) return 1 ;;
+    esac
+    h=${h%%/*}; h=${h%%\?*}; h=${h%%#*}
+    h=${h##*@}
+    h=${h%%:*}
+    [ -n "$h" ] || return 1
+    printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+# Is $1 the domain $2, or a subdomain of it? This is deliberately NOT a
+# substring test: `evilunsplash.com` contains `unsplash.com`, and labelling it
+# `unsplash` hands a hostile source the provenance of a trusted one. The dot
+# in `*."$2"` is what makes the boundary real, and `unsplash.com.evil.invalid`
+# fails both arms.
+host_under() { # $1 host, $2 domain
+    case "$1" in "$2" | *."$2") return 0 ;; esac
+    return 1
+}
+
 # One SCRIPT-GLOBAL scratch file with one top-level EXIT trap. A per-function
 # `local tmp` + `trap ... EXIT` leaks: at shell exit the local is out of scope
 # and the trap deletes nothing (Codex re-review finding 2). Functions assign
@@ -146,25 +183,43 @@ save_wallpaper() {
     mkdir -p "$WALLPAPER_DIR" || die "cannot create $WALLPAPER_DIR"
     dest="$WALLPAPER_DIR/$base.$ext"
     n=2
-    while [ -e "$dest" ]; do
-        if [ "$(hash_of "$1")" = "$(hash_of "$dest")" ]; then
+    # ONE mechanism answers both "is this name free?" and "write it": bash's
+    # noclobber redirect opens O_CREAT|O_EXCL, which fails on anything already
+    # at the path — regular file, directory, or symlink, INCLUDING a dangling
+    # one. Asking with `[ -e ]` first would be two mistakes at once: `-e`
+    # FOLLOWS symlinks, so a dangling symlink planted in the library reads as a
+    # vacant slot and a plain `cp` writes straight through it to a target
+    # outside the library; and a separate check leaves a window in which the
+    # answer can change before the write. There is no window here because there
+    # is no separate check.
+    until ( set -C; cat "$1" >"$dest" ) 2>/dev/null; do
+        # The redirect failed. If nothing is at the path, the cause was not an
+        # occupied name — the directory is unwritable, or worse — and trying
+        # suffixes would just spin.
+        [ -e "$dest" ] || [ -L "$dest" ] || die "cannot write $dest"
+        # Occupied. Reuse only a byte-identical PLAIN file: `-f` follows
+        # symlinks, so `-L` is what stops an alias to an identical file from
+        # being adopted as the saved wallpaper.
+        if [ -f "$dest" ] && [ ! -L "$dest" ] &&
+            [ "$(hash_of "$1")" = "$(hash_of "$dest")" ]; then
             SAVED="$dest"
             [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
                 xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
-            note "already have $(basename "$dest") — reusing it"
+            note "already have $(display_text "$(basename "$dest")") — reusing it"
             return 0
         fi
+        [ "$n" -le 99 ] ||
+            die "cannot save into $WALLPAPER_DIR — 99 names starting $base are taken"
         dest="$WALLPAPER_DIR/$base-$n.$ext"
         n=$((n + 1))
     done
-    cp "$1" "$dest" || die "cannot write $dest"
     chmod 644 "$dest"
     SAVED="$dest"
     # Provenance for `theme list`: where this wallpaper came from, recorded on
     # the file itself. Read back by wall_source(); best-effort, never fatal.
     [ -n "$SOURCE_URL" ] && xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
     local size w; size=$(img_size "$dest"); w="${size%%x*}"
-    note "saved $(basename "$dest")${size:+ ($size)}"
+    note "saved $(display_text "$(basename "$dest")")${size:+ ($size)}"
     if [ -n "$w" ] && [ "$w" -lt "$MIN_WIDTH" ] 2>/dev/null; then
         note "warning: only ${w}px wide, below the ${MIN_WIDTH}px desktop floor"
     fi
@@ -535,14 +590,33 @@ wall_source() { # $1 file
     fi
     # The xattr is data from disk, not trusted layout input: control bytes
     # (newlines, escapes) could otherwise reach the aligned tables raw.
-    src=$(printf '%s' "$src" | tr -d '[:cntrl:]')
+    src=$(display_text "$src")
     case "$src" in
-    '' | '(null)') printf -- '-' ;;
-    *unsplash.com*) printf 'unsplash' ;;
-    *pinimg.com* | *pinterest.*) printf 'pinterest' ;;
-    *redd.it* | *reddit.com* | *redditmedia.com*) printf 'reddit' ;;
-    *) printf '%s' "$src" | sed -E 's#^[a-zA-Z]+://##; s#^www\.##; s#[/:].*##' ;;
+    '' | '(null)') printf -- '-'; return 0 ;;
     esac
+    # A provider label is a claim about WHERE a file came from, so it is
+    # decided by the parsed hostname and never by a substring: `*unsplash.com*`
+    # matched `https://evilunsplash.com/payload` and rendered it `unsplash`,
+    # which is exactly the provenance an attacker would want to borrow.
+    local host dom
+    if host=$(url_host "$src"); then
+        for dom in unsplash.com images.unsplash.com; do
+            host_under "$host" "$dom" && { printf 'unsplash'; return 0; }
+        done
+        for dom in pinimg.com pinterest.com; do
+            host_under "$host" "$dom" && { printf 'pinterest'; return 0; }
+        done
+        for dom in redd.it reddit.com redditmedia.com; do
+            host_under "$host" "$dom" && { printf 'reddit'; return 0; }
+        done
+        # Anything else is shown as the host it actually is. A Pinterest
+        # country domain (pinterest.co.uk) lands here rather than in the label
+        # above: naming it honestly beats widening the match to a shape that
+        # `pinterest.evil.invalid` also fits.
+        printf '%s' "${host#www.}"
+        return 0
+    fi
+    printf '%s' "$src" | sed -E 's#^[a-zA-Z]+://##; s#^www\.##; s#[/:].*##'
 }
 
 # The first 8 palette colors a wallpaper DERIVED when it was last applied,
@@ -664,6 +738,10 @@ cmd_list() {
         while IFS= read -r f; do
             name=$(basename "$f")
             name="${name%.*}"
+            # Sanitize BEFORE measuring: a stripped byte must not be counted
+            # against the column, and the row must never carry disk bytes to
+            # the terminal as protocol.
+            name=$(display_text "$name")
             [ "${#name}" -gt "$namew" ] && name="$(printf '%.*s' $((namew - 1)) "$name")…"
             PV_APC=""; PV1=""; PV2=""
             if [ -n "$pvok" ] && wall_preview "$f"; then
@@ -714,9 +792,13 @@ cmd_preview() { # $1 optional wallpaper name/path
         img=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
         [ -n "$img" ] && [ -f "$img" ] || die "no current wallpaper to preview — name one: theme preview <wallpaper>"
     fi
+    # Display copies only. $img stays byte-exact — it is what render_preview,
+    # img_size, stat and wall_scheme open.
     name=$(basename "$img"); name="${name%.*}"
+    name=$(display_text "$name")
     loc="$img"
     case "$loc" in "$HOME"/*) loc="~${loc#"$HOME"}" ;; esac
+    loc=$(display_text "$loc")
     src=$(wall_source "$img")
     dims=$(img_size "$img")
     bytes=$(stat -f %z "$img" 2>/dev/null || printf 0)
@@ -873,7 +955,7 @@ cmd_rm() {
         img=$(resolve_library "$name") ||
             die "no wallpaper named '$name' in $WALLPAPER_DIR (rm takes library NAMES, never paths)"
         rm "$img" || die "could not delete $img"
-        note "successfully deleted \"$(basename "$img")\""
+        note "successfully deleted \"$(display_text "$(basename "$img")")\""
         [ "$img" = "$cur" ] && note "that was the current wallpaper — pick a new one with theme wal / theme set"
     done
     return 0
@@ -892,10 +974,13 @@ cmd_rename() {
     base=$(slugify "$new")
     [ -n "$base" ] || die "that name slugifies to nothing — give it at least one letter or digit"
     dest="$(dirname "$img")/$base.${img##*.}"
-    [ "$dest" = "$img" ] && { note "already named $(basename "$img")"; return 0; }
-    [ -e "$dest" ] && die "$(basename "$dest") already exists"
+    [ "$dest" = "$img" ] && { note "already named $(display_text "$(basename "$img")")"; return 0; }
+    # `-L` for the same reason as save_wallpaper: a dangling symlink is an
+    # occupied name, not a free one.
+    { [ -e "$dest" ] || [ -L "$dest" ]; } &&
+        die "$(display_text "$(basename "$dest")") already exists"
     mv "$img" "$dest" || die "rename failed"
-    note "successfully renamed \"$(basename "$img")\" to \"$(basename "$dest")\""
+    note "successfully renamed \"$(display_text "$(basename "$img")")\" to \"$(display_text "$(basename "$dest")")\""
     cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     if [ "$cur" = "$img" ]; then
         set_desktop "$dest"

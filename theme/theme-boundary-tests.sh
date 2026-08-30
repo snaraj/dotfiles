@@ -27,6 +27,12 @@
 #     wallpapers whose mangled names are byte-identical, in both mtime orders.
 #     An unapplied wallpaper renders a dash rather than invented colors, and a
 #     corrupt entry degrades to that same dash with a silent stderr.
+#   - the filesystem-to-output boundary: a DANGLING symlink in the library is
+#     an occupied name rather than a free one, so a download can never be
+#     redirected through it; filenames reach the terminal as text and never as
+#     control protocol (an OSC 52 clipboard write in a name stays inert); and
+#     a provider label is decided by the parsed hostname, so a lookalike host
+#     cannot borrow a trusted source's provenance.
 # Runs entirely in a throwaway directory; exits 0 on pass.
 set -u
 THEME="$(cd "$(dirname "$0")" && pwd)/theme.sh"
@@ -367,5 +373,96 @@ else pass "unapplied wallpaper lists an honest dash"; fi
 if row 'scheme-bad' | grep -q '48;2;' || [ -s "$listerr" ]; then
     fail "a corrupt cache entry produced a swatch or an error"
 else pass "corrupt cache entry degrades to a dash, silently"; fi
+# --- a DANGLING symlink is an occupied name, not a free one -----------------
+# `[ -e ]` follows symlinks, so a dangling one reads as a vacant slot and the
+# save below lands on its target — outside the library entirely. The download
+# must step over the hijacked name into the next free suffix, leave the symlink
+# alone, and write nothing beyond the boundary.
+urlbin="$fixture/urlbin"
+mkdir -p "$urlbin"
+cat >"$urlbin/curl" <<'EOS'
+#!/bin/bash
+# Answers any -o request with one deterministic PNG. No network, no logging.
+o=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done
+[ -n "$o" ] && printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$o"
+exit 0
+EOS
+chmod +x "$urlbin/curl"
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_url() { PATH="$urlbin:$PATH" WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    TMPDIR="$fixture/tmpdir" bash "$THEME" url "$1"; }
+ln -s "$out/redirected.png" "$lib/hijacked.png"
+check  "download onto a hijacked name succeeds" 0 run_url https://img.invalid/hijacked.png
+exists "nothing written through the symlink"   no "$out/redirected.png"
+exists "download landed inside the library"    yes "$lib/hijacked-2.png"
+if [ -L "$lib/hijacked.png" ]; then pass "the hijacking symlink is left alone"
+else fail "the hijacking symlink was replaced or removed"; fi
+# A symlink to an IDENTICAL in-library file is still not that file. `-f`
+# follows symlinks, so without the `-L` arm the alias hashes equal and gets
+# adopted as the saved wallpaper — the library would then hold a wallpaper
+# that is really a pointer, and renaming or deleting it would act on the link.
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/aliastarget.png"
+ln -s "$lib/aliastarget.png" "$lib/aliased.png"
+check  "download onto an alias of identical bytes" 0 run_url https://img.invalid/aliased.png
+exists "the alias was stepped over, not adopted"   yes "$lib/aliased-2.png"
+if [ -L "$lib/aliased.png" ]; then pass "the alias itself is left alone"
+else fail "the alias was replaced by a regular file"; fi
+
+# The in-library positive: a free name still produces an ordinary regular file.
+check  "download onto a free name succeeds"    0 run_url https://img.invalid/plain-name.png
+if [ -f "$lib/plain-name.png" ] && [ ! -L "$lib/plain-name.png" ]; then
+    pass "a free name yields a regular file in the library"
+else fail "free-name download did not produce a regular library file"; fi
+
+# --- filenames are DATA, never terminal protocol ---------------------------
+# macOS accepts every byte but '/' and NUL in a name, so a wallpaper can be
+# called ESC ] 52 ; c ; <base64> BEL — an OSC 52 clipboard write. Reaching a
+# real terminal, those bytes are executed as protocol instead of shown as a
+# title. Nothing this tool prints uses OSC, so the assertion is simply that
+# no ESC ] ever leaves it.
+oscname="osc52-safe$(printf '\033]52;c;U0FGRQ==\007')"
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/$oscname.png"
+osc_open=$(printf '\033]')
+pv_osc=$(COLUMNS=120 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+    bash "$THEME" preview osc52- 2>/dev/null)
+if printf '%s' "$pv_osc" | grep -qF -- "$osc_open"; then
+    fail "preview emitted a filename's OSC sequence"
+else pass "preview never emits a filename's OSC sequence"; fi
+# Non-vacuous in the other direction too: sanitizing must strip the control
+# bytes, not the title. A guard that emptied the field would pass the check
+# above and tell the user nothing.
+if printf '%s' "$pv_osc" | grep -q 'osc52-safe'; then
+    pass "preview still shows the printable part of the title"
+else fail "preview dropped the whole title instead of its control bytes"; fi
+lv_osc=$(COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+    bash "$THEME" list 2>/dev/null)
+if printf '%s' "$lv_osc" | grep -qF -- "$osc_open"; then
+    fail "list emitted a filename's OSC sequence"
+else pass "list never emits a filename's OSC sequence"; fi
+
+# --- provenance is the parsed HOST, never a substring ----------------------
+# `*unsplash.com*` matched `https://evilunsplash.com/payload` and labelled it
+# `unsplash` — a hostile source borrowing a trusted one's provenance. Each
+# case below is a hostname that CONTAINS the trusted domain without being it.
+srccase() { # $1 description, $2 basename, $3 theme.source value, $4 expected label
+    local got
+    printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/$2.png"
+    xattr -w theme.source "$3" "$lib/$2.png" 2>/dev/null
+    got=$(COLUMNS=120 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+        bash "$THEME" preview "$2" 2>/dev/null | sed -n 's/^ *SOURCE  *//p')
+    if [ "$got" = "$4" ]; then pass "$1"; else fail "$1 (got '$got', wanted '$4')"; fi
+}
+srccase "the genuine host still labels unsplash"  srchost-good \
+    "https://unsplash.com/photos/abc" unsplash
+srccase "a subdomain of it still labels unsplash" srchost-sub \
+    "https://images.unsplash.com/photo-1" unsplash
+srccase "a lookalike PREFIX host is not unsplash" srchost-evil \
+    "https://evilunsplash.com/payload" evilunsplash.com
+srccase "a SUFFIX-extended host is not unsplash"  srchost-suffix \
+    "https://unsplash.com.evil.invalid/x" unsplash.com.evil.invalid
+srccase "userinfo cannot fake the host"           srchost-userinfo \
+    "https://unsplash.com@evil.invalid/x" evil.invalid
+
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "$fails FAILURES"; fi
 exit "$fails"
