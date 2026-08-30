@@ -12,8 +12,8 @@ This is the detailed reference — the repo root README deliberately stays short
 One command owns two things that should always agree:
 
 - the **desktop wallpaper** (via the `wallpaper` brew formula on macOS), and
-- the **terminal palette**, either derived from that wallpaper with
-  [pywal](https://github.com/dylanaraps/pywal) or pinned to a static kitty theme.
+- the **terminal palette**, derived from that wallpaper with
+  [pywal](https://github.com/dylanaraps/pywal).
 
 It can also *fetch* new wallpapers — from Unsplash or from any image URL or
 Pinterest pin — save them into the wallpaper library with a readable filename,
@@ -28,8 +28,6 @@ theme wal                # random local wallpaper -> desktop + pywal colors
 theme wal <image>        # specific local image  -> desktop + pywal colors
 theme random             # explicit name for `theme wal` with no argument
 theme set <image>        # explicit name for `theme wal <image>`
-theme static             # static kitty theme (default: catppuccin-mocha)
-theme static <name>      # any file in ~/.config/kitty/themes/<name>.conf
 theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
@@ -57,9 +55,6 @@ theme set ~/Pictures/screenshot-4k.png       # any path outside the library
 
 # Shuffle
 theme random
-
-# Pin the terminal to a fixed scheme, leaving the desktop alone
-theme static catppuccin-mocha
 
 # Pull something new from Unsplash (needs a free key, see below)
 theme unsplash
@@ -174,8 +169,7 @@ Implementation notes worth knowing:
 ```
 ~/.config/kitty/kitty.conf
       └── include current-theme.conf          (gitignored; rewritten by `theme`)
-                 └── include ~/.cache/wal/colors-kitty.conf     ← pywal mode
-                     or     ~/.config/kitty/themes/<name>.conf  ← static mode
+                 └── include ~/.cache/wal/colors-kitty.conf
 ```
 
 `theme` only ever rewrites the one-line `current-theme.conf`, then pushes the
@@ -194,18 +188,6 @@ socket.
 
 `kitten themes` (built into kitty) writes the same `current-theme.conf`, so the
 two coexist; `theme status` will report whatever is currently included.
-
-### Adding static themes
-
-Drop any kitty color `.conf` into `~/.config/kitty/themes/`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/catppuccin/kitty/main/themes/latte.conf \
-  -o ~/.config/kitty/themes/catppuccin-latte.conf
-theme static catppuccin-latte
-```
-
-It shows up in `theme list` and `theme help` immediately.
 
 ### Environment variables
 

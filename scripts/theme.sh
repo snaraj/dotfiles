@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# theme — desktop wallpaper + terminal palette CLI (pywal / static kitty themes).
+# theme — desktop wallpaper + terminal palette CLI (pywal).
 # Full documentation: ~/.config/scripts/README.md
 # Set THEME_NO_APPLY=1 to exercise every code path without touching the desktop.
 
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config}"
 KITTY_DIR="${KITTY_CONFIG_DIRECTORY:-$CONFIG_DIR/kitty}"
-THEMES_DIR="$KITTY_DIR/themes"
 CURRENT="$KITTY_DIR/current-theme.conf"
 WALLPAPER_DIR="${WALLPAPER_DIR:-$CONFIG_DIR/wallpapers/pc}"
 WAL_CACHE="${WAL_CACHE:-$HOME/.cache/wal}"
@@ -475,8 +474,6 @@ cmd_url() {
 
 # --- reporting -------------------------------------------------------------
 
-static_themes() { local f; for f in "$THEMES_DIR"/*.conf; do [ -e "$f" ] && basename "$f" .conf; done; return 0; }
-
 # Where a wallpaper came from, as a short label: the theme.source xattr our
 # own downloads record, falling back to macOS's kMDItemWhereFroms for files a
 # browser downloaded. Unknown is an honest "-", never a guess.
@@ -529,8 +526,6 @@ cmd_list() {
                 printf '  %-*s  %s\n' "$namew" "$name" "$src"
             fi
         done
-    printf '\nstatic themes (%s):\n' "$THEMES_DIR"
-    static_themes | sed 's/^/  /'
 }
 
 # Print the 16 palette colors as truecolor blocks, 8 per row — the same
@@ -547,8 +542,8 @@ swatch_row() { # $@ = hex colors (with or without #)
     return 0
 }
 
-# The 16 colors of the active scheme, one hex per line — pywal cache or a
-# static kitty theme file, whichever current-theme.conf points at.
+# The 16 colors of the active scheme, one hex per line — the pywal cache, or
+# whatever other conf current-theme.conf still points at.
 scheme_colors() {
     local inc
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
@@ -564,7 +559,7 @@ cmd_status() {
     case "$inc" in
     "") mode="unset" ;;
     *colors-kitty.conf) mode="pywal" ;;
-    *) mode="static ($(basename "${inc%.conf}"))" ;;
+    *) mode="$(basename "${inc%.conf}")" ;;
     esac
     current=$(cat "$WAL_CACHE/wal" 2>/dev/null)
     desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
@@ -700,7 +695,6 @@ usage() {
   theme wal [image]      pywal colors + desktop from a local image (random if omitted)
   theme random           random local wallpaper: desktop + pywal
   theme set <image>      specific local wallpaper (path, or name under the wallpaper dir)
-  theme static [name]    fixed kitty theme (default catppuccin-mocha)
   theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
                          (multi-word queries work bare: theme unsplash neon city rain;
                           paste an unsplash.com/photos/… link for exactly that photo)
@@ -760,17 +754,6 @@ theme set <image> [--rotate left|right] [--extend[=RRGGBB]]
     theme set nebulosa-red.png --extend
 EOF
         ;;
-    static) cat <<EOF
-theme static [name]
-
-  Switch kitty to a fixed theme from $THEMES_DIR (no pywal, wallpaper
-  untouched). Default: catppuccin-mocha. Available: $(static_themes | paste -sd' ' -)
-
-  Examples:
-    theme static                       # catppuccin-mocha
-    theme static catppuccin-mocha
-EOF
-        ;;
     unsplash) cat <<EOF
 theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
 
@@ -816,8 +799,8 @@ EOF
     list) cat <<EOF
 theme list [-v]
 
-  Wallpapers as a table sorted by LATEST ADDED, plus the static kitty
-  themes. Columns: title (truncated to the terminal) and source — the
+  Wallpapers as a table sorted by LATEST ADDED. Columns: title
+  (truncated to the terminal) and source — the
   site it came from (unsplash, pinterest, reddit, …), recorded when
   theme downloads it and read from macOS download metadata otherwise;
   an unknown source shows "-". -v adds format, size, and date added.
@@ -830,7 +813,7 @@ EOF
     status) cat <<EOF
 theme status
 
-  Show the current theme: wallpaper path, mode (pywal/static), the color
+  Show the current theme: wallpaper path, mode, the color
   scheme as truecolor swatches (like nvim/kitty theme pickers), palette
   source, and the variables the CLI reads (Unsplash key presence — never
   the value — wallpaper dir, pywal cache).
@@ -929,18 +912,6 @@ case "${1:-help}" in
 wal) cmd_local "${2:-}" ;;
 random) cmd_local "" ;;
 set) [ -n "${2:-}" ] || die "usage: theme set <image>"; cmd_local "$2" ;;
-static)
-    name="${2:-catppuccin-mocha}"
-    file="$THEMES_DIR/$name.conf"
-    [ -f "$file" ] || die "no such theme '$name' in $THEMES_DIR (have: $(static_themes | paste -sd' ' -))"
-    if dry; then
-        note "[no-apply] would select static theme '$name'"
-    else
-        printf 'include %s\n' "$file" >"$CURRENT" || die "cannot write $CURRENT"
-        reload_kitty "$file"
-    fi
-    note "static theme '$name'"
-    ;;
 unsplash)
     shift
     if [ "${1:-}" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status; else cmd_unsplash "$*"; fi
