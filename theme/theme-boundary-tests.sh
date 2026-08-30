@@ -126,6 +126,17 @@ check  "rm with trailing unknown flag refused" 1 run "$lib" rm keepme.jpg --bogu
 exists "no partial delete before flag error"   yes "$lib/keepme.jpg"
 check  "set with trailing unknown flag refused" 1 run "$lib" set keepme.jpg --bogus
 
+# --- `wal` was removed as a pure duplicate of set/random -------------------
+# Exit status alone cannot pin this: with the dispatch arm restored, `wal`
+# runs cmd_local, which ALSO exits nonzero when the random pick happens to be
+# an unreadable image or the library is empty — a false pass. So assert on the
+# message only the unknown-command branch prints. Re-adding `wal)` makes this
+# go red because cmd_local never prints it.
+walout=$(run "$lib" wal 2>&1 || true)
+if printf '%s' "$walout" | grep -qF "unknown command 'wal'"; then
+    pass "the removed 'wal' command is rejected as unknown"
+else fail "'theme wal' still dispatches instead of being unknown"; fi
+
 # --- right-column values are BOUNDED and control-sanitized (Codex round 9) -
 # A custom download host in the theme.source xattr is arbitrary-length data
 # from disk: it must truncate to the preview's right column (both the
@@ -530,8 +541,11 @@ sweep list
 sweep list -v
 sweep preview sweep-safe
 sweep preview sizeinject
+# cmd_local has two entry shapes and the sweep drives both: a NAMED image, and
+# a random pick with no argument. `theme wal` used to be the second one; it was
+# removed as a duplicate of `set`/`random`, and `random` is the same call.
 sweep set sweep-safe
-sweep wal
+sweep random
 sweep rename sweep-mv renamed-by-sweep
 sweep rm sweep-rm
 sweep "unknown$oscpay"

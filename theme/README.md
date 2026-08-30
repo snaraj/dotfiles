@@ -24,10 +24,8 @@ and apply them in one step.
 ```sh
 theme                    # usage
 theme help               # same
-theme wal                # random local wallpaper -> desktop + pywal colors
-theme wal <image>        # specific local image  -> desktop + pywal colors
-theme random             # explicit name for `theme wal` with no argument
-theme set <image>        # explicit name for `theme wal <image>`
+theme random             # random wallpaper from the wallpaper folder -> desktop + pywal colors
+theme set <image>        # specific local image -> desktop + pywal colors
 theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
@@ -48,8 +46,8 @@ theme rename <w> <n…>    # rename a saved wallpaper (slugified, extension kept
 theme rm <w…>            # delete saved wallpapers by name (library only)
 ```
 
-`wal`, `random` and `set` are the same code path; `random`/`set` exist because
-they say out loud what the argument means.
+`random` and `set` are the same code path, split so the command name says out
+loud whether an image was chosen or shuffled for you.
 
 ### Examples
 

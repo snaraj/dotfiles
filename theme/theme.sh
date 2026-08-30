@@ -984,7 +984,7 @@ cmd_rm() {
             die "no wallpaper named '$name' in $WALLPAPER_DIR (rm takes library NAMES, never paths)"
         rm "$img" || die "could not delete $img"
         note "successfully deleted \"$(basename "$img")\""
-        [ "$img" = "$cur" ] && note "that was the current wallpaper — pick a new one with theme wal / theme set"
+        [ "$img" = "$cur" ] && note "that was the current wallpaper — pick a new one with theme set / theme random"
     done
     return 0
 }
@@ -1055,8 +1055,7 @@ usage() {
     printf '  os:                 %s\n' "$os"
     cat <<EOF
 
-  theme wal [image]      palette + desktop from a local image (random if omitted)
-  theme random           random local wallpaper: desktop + palette
+  theme random           random wallpaper from the configured wallpaper folder
   theme set <image>      specific local wallpaper (path, or name under the wallpaper dir)
   theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
                          (multi-word queries work bare: theme unsplash neon city rain;
@@ -1082,27 +1081,15 @@ EOF
 # Per-subcommand help for `theme <cmd> --help`.
 usage_cmd() {
     case "$1" in
-    wal) cat <<EOF
-theme wal [image] [--rotate left|right] [--extend[=RRGGBB]]
+    random) cat <<EOF
+theme random [--rotate left|right] [--extend[=RRGGBB]]
 
-  Derive a color palette from a local image and apply it everywhere:
+  Pick a random wallpaper from $WALLPAPER_DIR and apply it everywhere:
   desktop wallpaper + kitty recolor (live windows and future ones).
-  [image] is a path or a name under $WALLPAPER_DIR (extension optional).
-  No image = a random local wallpaper.
 
   Examples:
-    theme wal                          # random local wallpaper
-    theme wal night-sky-city-blue-lights
-    theme wal ~/Downloads/pic.jpg --rotate right
-EOF
-        ;;
-    random) cat <<EOF
-theme random
-
-  Same as \`theme wal\` with no image: random local wallpaper, applied.
-
-  Example:
     theme random
+    theme random --rotate right
 EOF
         ;;
     set) cat <<EOF
@@ -1293,7 +1280,6 @@ if [ "$_help" = 1 ]; then
 fi
 
 case "${1:-help}" in
-wal) cmd_local "${2:-}" ;;
 random) cmd_local "" ;;
 set) [ -n "${2:-}" ] || die "usage: theme set <image>"; cmd_local "$2" ;;
 unsplash)
