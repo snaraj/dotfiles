@@ -89,9 +89,10 @@ checks before anything is applied:
    to resolve to a real image via its `og:image` meta tag (this is how
    Pinterest pins work) — after that it is an error.
 2. **Named descriptively.** The filename is slugified from the best hint
-   available: the Unsplash photo slug plus photographer, the page's `og:title`,
-   or the URL basename. Junk names like `.../3840/2160.jpg` fall back to the
-   whole host-and-path so the file is still identifiable.
+   available: your search prompt plus the photo's own description (Unsplash),
+   the page's `og:title`, or the URL basename — long names cut at a word
+   boundary. Bare CDN-hash basenames become `pinterest-<timestamp>`. The
+   photographer is credited in the terminal note, never baked into the name.
 3. **Never overwrites.** If the target name already exists and the bytes are
    identical, the existing file is reused and nothing is downloaded again. If
    the bytes differ, the new file takes the next free `-2`, `-3`, … suffix. An
@@ -155,8 +156,9 @@ Implementation notes worth knowing:
 - After a successful download it pings the photo's `download_location`
   endpoint. That is an Unsplash API guideline requirement (it credits the
   photographer's download count) and costs nothing.
-- The photographer's name is printed on success and baked into the filename.
-  If you republish one of these images anywhere, attribute them.
+- The photographer's name is printed on success (the filename carries your
+  prompt and the photo's description instead). If you republish one of these
+  images anywhere, attribute them.
 
 ### How the kitty include chain works
 
@@ -168,9 +170,12 @@ Implementation notes worth knowing:
 ```
 
 `theme` only ever rewrites the one-line `current-theme.conf`, then pushes the
-new colors to every running kitty instance over its remote-control socket
-(`kitty.conf` sets `allow_remote_control socket-only` and
-`listen_on unix:/tmp/kitty-samuel`). `kitten @ set-colors --all --configured`
+new colors to every running kitty instance over its remote-control socket.
+The socket's authority is capability-scoped, not open: `kitty.conf` sets
+`allow_remote_control password`, `listen_on unix:/tmp/kitty-samuel`, and
+`remote_control_password "" set-colors`, so a passwordless socket client may
+call `set-colors` and nothing else — no window reads, no send-text, no
+launch. `kitten @ set-colors --all --configured`
 recolors existing windows *and* updates the instance's stored config, so
 windows opened later inherit the new palette too — no restart, no new window.
 A running instance ignores `SIGUSR1` on macOS, so the signal survives only as
