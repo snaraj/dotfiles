@@ -128,9 +128,9 @@ name_hint() {
 # Try the upgraded URL first, fall back to exactly what was asked for.
 fetch_img() {
     local up; up=$(pinimg_original "$1")
-    curl -fsL --max-time 60 -A "$UA" -o "$2" "$up" && return 0
+    curl -fsLg --max-time 60 -A "$UA" -o "$2" "$up" && return 0
     [ "$up" = "$1" ] && return 1
-    curl -fsL --max-time 60 -A "$UA" -o "$2" "$1"
+    curl -fsLg --max-time 60 -A "$UA" -o "$2" "$1"
 }
 
 # Save $1 (temp file, mime $2, name hint $3) into WALLPAPER_DIR; sets $SAVED.
@@ -150,6 +150,8 @@ save_wallpaper() {
     while [ -e "$dest" ]; do
         if [ "$(hash_of "$1")" = "$(hash_of "$dest")" ]; then
             SAVED="$dest"
+            [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
+                xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
             note "already have $(basename "$dest") — reusing it"
             return 0
         fi
@@ -159,6 +161,9 @@ save_wallpaper() {
     cp "$1" "$dest" || die "cannot write $dest"
     chmod 644 "$dest"
     SAVED="$dest"
+    # Provenance for `theme list`: where this wallpaper came from, recorded on
+    # the file itself. Read back by wall_source(); best-effort, never fatal.
+    [ -n "$SOURCE_URL" ] && xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
     local size w; size=$(img_size "$dest"); w="${size%%x*}"
     note "saved $(basename "$dest")${size:+ ($size)}"
     if [ -n "$w" ] && [ "$w" -lt "$MIN_WIDTH" ] 2>/dev/null; then
@@ -317,33 +322,48 @@ cmd_unsplash() {
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
     case "$1" in
-    *unsplash.com/photos/*)
-        # A photo-page link fetches THAT photo, not a search: the API's
-        # /photos/:id endpoint accepts the page slug (and the bare photo id).
+    *://*)
+        # A pasted link fetches THAT photo via the API's /photos/:id (which
+        # accepts the page slug) — but only an EXACT https Unsplash photo
+        # page qualifies (a substring match admitted evilunsplash.com), and
+        # the slug is charset-allowlisted before it may sit in URL position,
+        # so bracket/brace/ampersand payloads never reach curl as syntax.
+        case "$1" in
+        https://unsplash.com/photos/?* | https://www.unsplash.com/photos/?*) ;;
+        *) die "only https://unsplash.com/photos/… links work here — for other links use: theme url" ;;
+        esac
         pick="${1##*/photos/}"
         pick="${pick%%\?*}"
         pick="${pick%%/*}"
-        [ -n "$pick" ] || die "no photo id in that Unsplash link"
+        case "$pick" in
+        '' | *[!A-Za-z0-9_-]*) die "that link carries no valid photo id (letters, digits, - and _ only)" ;;
+        esac
         url="https://api.unsplash.com/photos/$pick"
         query=""
+        SOURCE_URL="$1"
         ;;
     *)
         url="https://api.unsplash.com/photos/random?count=5&orientation=landscape&content_filter=high"
-        [ -n "$1" ] && url="$url&query=$(printf '%s' "$1" | sed 's/ /%20/g')"
         ;;
     esac
-    # The key goes to curl via stdin config, never argv, so it stays out of `ps`.
+    # The key goes to curl via stdin config, never argv, so it stays out of
+    # `ps`; -g (globoff) keeps [] and {} in any input literal — one command is
+    # one request; -G --data-urlencode encodes the WHOLE query, not just
+    # spaces, so & or [] in a search stays search text.
+    local curl_args=(-fsLg --max-time 30 -K -)
+    [ -n "$query" ] && curl_args+=(-G --data-urlencode "query=$query")
     json=$(printf 'header = "Authorization: Client-ID %s"\n' "$key" |
-        curl -fsL --max-time 30 -K - "$url") || die "Unsplash request failed (bad key, rate limit, or no network)"
+        curl "${curl_args[@]}" "$url") || die "Unsplash request failed (bad key, rate limit, or no network)"
     IFS=$'\t' read -r img_url w h slug dl who < <(printf '%s' "$json" | python3 -c "$UNSPLASH_PY") ||
         die "Unsplash returned no usable photo"
     [ -n "$img_url" ] || die "Unsplash returned no image URL"
+    [ -n "$SOURCE_URL" ] || SOURCE_URL="$img_url"
     if [ "$w" -ge 3840 ] 2>/dev/null; then :
     elif [ -n "$pick" ]; then note "that photo's original is ${w}x${h} (under 3840px)"
     else note "best of 5 candidates is ${w}x${h} (wanted 3840px+)"
     fi
     scratch_new
-    curl -fsL --max-time 90 -A "$UA" -o "$SCRATCH" "$img_url" || die "photo download failed"
+    curl -fsLg --max-time 90 -A "$UA" -o "$SCRATCH" "$img_url" || die "photo download failed"
     local mime; mime=$(file -b --mime-type "$SCRATCH")
     case "$mime" in image/*) ;; *) die "Unsplash served $mime, not an image" ;; esac
     # Name = your search prompt (when given) + the photo's own description —
@@ -355,14 +375,50 @@ cmd_unsplash() {
     scratch_done
     # Unsplash API guideline: report the download so the photographer is credited.
     [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
-        curl -fs --max-time 15 -K - -o /dev/null "$dl" 2>/dev/null
+        curl -fsg --max-time 15 -K - -o /dev/null "$dl" 2>/dev/null
     [ -n "$who" ] && note "photo by $who on Unsplash"
     use_image "$SAVED"
+}
+
+# Unsplash API usage for the configured key. The API reports the hourly
+# window only in response headers (X-Ratelimit-Limit / -Remaining), so this
+# makes ONE cheap list request to read them — and says so, since that request
+# itself comes out of the budget. Access keys are per-APPLICATION Client-IDs:
+# there is no logged-in user to show, and claiming one would be invented data.
+cmd_unsplash_status() {
+    local key limit remaining
+    key=$(unsplash_key)
+    [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    scratch_new
+    printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+        curl -fsg --max-time 15 -K - -D "$SCRATCH" -o /dev/null \
+            "https://api.unsplash.com/photos?page=1&per_page=1" ||
+        die "Unsplash request failed (bad key, rate limit exhausted, or no network)"
+    limit=$(awk 'tolower($1)=="x-ratelimit-limit:"{sub("\r","",$2); print $2}' "$SCRATCH")
+    remaining=$(awk 'tolower($1)=="x-ratelimit-remaining:"{sub("\r","",$2); print $2}' "$SCRATCH")
+    scratch_done
+    [ -n "$limit" ] || die "Unsplash answered without rate-limit headers"
+    printf 'requests left this hour:  %s/%s (resets on the hour)\n' "$remaining" "$limit"
+    case "$limit" in
+    50) printf 'tier:                     demo (50/hour; production raises it to 5000)\n' ;;
+    5000) printf 'tier:                     production (5000/hour)\n' ;;
+    *) printf 'tier:                     custom limit %s/hour\n' "$limit" ;;
+    esac
+    if [ -n "${UNSPLASH_ACCESS_KEY:-}" ]; then
+        printf 'key:                      set (env UNSPLASH_ACCESS_KEY)\n'
+    else
+        printf 'key:                      set (Keychain: unsplash-access-key)\n'
+    fi
+    printf 'account:                  application access key (Client-ID) — usage counts\n'
+    printf '                          per app; no user is logged in over this key\n'
+    printf 'note:                     this check spent 1 request of the window above\n'
+    return 0
 }
 
 cmd_url() {
     local link="$1" mime hint meta page_img page_title
     [ -n "$link" ] || die "usage: theme url <image-url | pinterest-pin-url>"
+    SOURCE_URL="$1"
     scratch_new
     # A direct i.pinimg.com /NNNx/ link is a Pinterest downscale; the same path
     # under /originals/ is the full-resolution upload when it exists. Sharpness
@@ -421,10 +477,58 @@ cmd_url() {
 
 static_themes() { local f; for f in "$THEMES_DIR"/*.conf; do [ -e "$f" ] && basename "$f" .conf; done; return 0; }
 
+# Where a wallpaper came from, as a short label: the theme.source xattr our
+# own downloads record, falling back to macOS's kMDItemWhereFroms for files a
+# browser downloaded. Unknown is an honest "-", never a guess.
+wall_source() { # $1 file
+    local src
+    src=$(xattr -p theme.source "$1" 2>/dev/null)
+    if [ -z "$src" ]; then
+        src=$(mdls -raw -name kMDItemWhereFroms "$1" 2>/dev/null |
+            sed -n 's/^[[:space:]]*"\([^"]*\)".*$/\1/p' | head -1)
+    fi
+    case "$src" in
+    '' | '(null)') printf -- '-' ;;
+    *unsplash.com*) printf 'unsplash' ;;
+    *pinimg.com* | *pinterest.*) printf 'pinterest' ;;
+    *redd.it* | *reddit.com* | *redditmedia.com*) printf 'reddit' ;;
+    *) printf '%s' "$src" | sed -E 's#^[a-zA-Z]+://##; s#^www\.##; s#[/:].*##' ;;
+    esac
+}
+
+# Wallpapers as a table, LATEST ADDED first (APFS birth time), titles
+# truncated to the terminal; -v adds format, size, and the date added.
 cmd_list() {
-    printf 'wallpapers (%s):\n' "$WALLPAPER_DIR"
+    local cols namew f name src fmt bytes added
+    cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
+    if [ -n "$VERBOSE" ]; then namew=$((cols - 44)); else namew=$((cols - 15)); fi
+    [ "$namew" -gt 72 ] && namew=72
+    [ "$namew" -lt 20 ] && namew=20
+    printf 'wallpapers (%s), latest first:\n\n' "$WALLPAPER_DIR"
+    if [ -n "$VERBOSE" ]; then
+        printf '  %-*s  %-10s  %-6s  %-7s  %s\n' "$namew" TITLE SOURCE FORMAT SIZE ADDED
+    else
+        printf '  %-*s  %s\n' "$namew" TITLE SOURCE
+    fi
     find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null |
-        sed "s#^$WALLPAPER_DIR/#  #" | sort
+        while IFS= read -r f; do
+            printf '%s\t%s\n' "$(stat -f %B "$f" 2>/dev/null || printf 0)" "$f"
+        done | sort -rn | cut -f2- |
+        while IFS= read -r f; do
+            name=$(basename "$f")
+            name="${name%.*}"
+            [ "${#name}" -gt "$namew" ] && name="$(printf '%.*s' $((namew - 1)) "$name")…"
+            src=$(wall_source "$f")
+            if [ -n "$VERBOSE" ]; then
+                fmt="${f##*.}"
+                bytes=$(stat -f %z "$f" 2>/dev/null || printf 0)
+                bytes=$(awk -v b="$bytes" 'BEGIN{ if (b >= 1048576) printf "%.1fM", b/1048576; else printf "%.0fK", b/1024 }')
+                added=$(stat -f '%SB' -t '%Y-%m-%d' "$f" 2>/dev/null)
+                printf '  %-*s  %-10s  %-6s  %-7s  %s\n' "$namew" "$name" "$src" "$fmt" "$bytes" "$added"
+            else
+                printf '  %-*s  %s\n' "$namew" "$name" "$src"
+            fi
+        done
     printf '\nstatic themes (%s):\n' "$THEMES_DIR"
     static_themes | sed 's/^/  /'
 }
@@ -564,18 +668,47 @@ cmd_rename() {
 }
 
 usage() {
+    local desk inc label colors term os
+    printf 'theme allows you to control your terminal theme and your wallpaper all from one place.\n\n'
+    desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+    inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
+    case "$inc" in
+    "") label="" ;;
+    *colors-kitty.conf) label="pywal" ;;
+    *) label="$(basename "${inc%.conf}")" ;;
+    esac
+    printf '  current theme:      %s\n' "${desk:-<none>}"
+    colors=$(scheme_colors)
+    if [ -n "$colors" ]; then
+        printf '  colorscheme:        '
+        # shellcheck disable=SC2046
+        swatch_row $(printf '%s\n' "$colors" | head -8)
+        printf ' %s\n' "$label"
+    else
+        printf '  colorscheme:        <none>\n'
+    fi
+    term="${KITTY_WINDOW_ID:+kitty 🐱}"
+    printf '  terminal provider:  %s\n' "${term:-${TERM_PROGRAM:-$TERM}}"
+    if [ "$(uname -s)" = Darwin ]; then
+        os="macOS $(sw_vers -productVersion 2>/dev/null) ($(uname -m))"
+    else
+        os=$(uname -srm)
+    fi
+    printf '  os:                 %s\n' "$os"
     cat <<EOF
-theme — wallpaper + terminal palette
 
   theme wal [image]      pywal colors + desktop from a local image (random if omitted)
   theme random           random local wallpaper: desktop + pywal
   theme set <image>      specific local wallpaper (path, or name under the wallpaper dir)
   theme static [name]    fixed kitty theme (default catppuccin-mocha)
   theme unsplash [query…] fetch a random high-res Unsplash photo, save it, apply it
-                         (multi-word queries work bare: theme unsplash neon city rain)
+                         (multi-word queries work bare: theme unsplash neon city rain;
+                          paste an unsplash.com/photos/… link for exactly that photo)
+  theme unsplash status  Unsplash API usage: requests left this hour, key, tier
   theme url <link>       direct image URL or Pinterest pin: download, save, apply
                          (pinimg /NNNx/ downscales auto-upgrade to /originals/)
-  theme list             local wallpapers and static themes
+  theme list [-v]        wallpaper table, latest first: title + source; -v adds
+                         format, size, date added
   theme status           current theme, color-scheme swatches, variables
   theme rename <w> <n…>  rename a saved wallpaper, keeping the naming format
   theme rm <w…>          delete saved wallpapers by name (no path needed)
@@ -587,9 +720,6 @@ theme — wallpaper + terminal palette
   --extend[=RRGGBB]      centre the design and grow the canvas to the screen's
                          shape in a solid color (default 000000) — for art on a
                          flat background: no crop, no zoom, no visible seams
-
-static themes: $(static_themes | paste -sd' ' -)
-docs: $CONFIG_DIR/scripts/README.md
 EOF
 }
 
@@ -654,11 +784,15 @@ theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
   searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
   Keychain item (see scripts/README.md).
 
+  theme unsplash status shows the API window for your key — requests
+  left this hour, tier, key source. The check itself costs 1 request.
+
   Examples:
     theme unsplash                     # surprise me
     theme unsplash neon city rain
     theme unsplash mountain lake sunrise --rotate right
     theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
+    theme unsplash status              # 39/50 requests remaining this hour
 EOF
         ;;
     url) cat <<EOF
@@ -680,12 +814,17 @@ theme url <link> [--rotate left|right]
 EOF
         ;;
     list) cat <<EOF
-theme list
+theme list [-v]
 
-  List local wallpapers and static kitty themes.
+  Wallpapers as a table sorted by LATEST ADDED, plus the static kitty
+  themes. Columns: title (truncated to the terminal) and source — the
+  site it came from (unsplash, pinterest, reddit, …), recorded when
+  theme downloads it and read from macOS download metadata otherwise;
+  an unknown source shows "-". -v adds format, size, and date added.
 
-  Example:
+  Examples:
     theme list
+    theme list -v
 EOF
         ;;
     status) cat <<EOF
@@ -743,6 +882,8 @@ EOF
 # here (any position) so the subcommands stay flag-free.
 ROTATE=""
 EXTEND=""
+VERBOSE=""
+SOURCE_URL=""
 _args=()
 _want=""
 for _a in "$@"; do
@@ -752,6 +893,7 @@ for _a in "$@"; do
     --rotate=*) ROTATE="${_a#*=}" ;;
     --extend) EXTEND="000000" ;;
     --extend=*) EXTEND="${_a#*=}"; EXTEND="${EXTEND#\#}" ;;
+    -v | --verbose) VERBOSE=1 ;;
     *) _args+=("$_a") ;;
     esac
 done
@@ -799,7 +941,10 @@ static)
     fi
     note "static theme '$name'"
     ;;
-unsplash) shift; cmd_unsplash "$*" ;;
+unsplash)
+    shift
+    if [ "${1:-}" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status; else cmd_unsplash "$*"; fi
+    ;;
 url) cmd_url "${2:-}" ;;
 list) cmd_list ;;
 status) cmd_status ;;
