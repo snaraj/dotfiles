@@ -12,8 +12,16 @@ MIN_WIDTH=2560
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 IMG_GLOB=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif')
 
-die() { printf 'theme: %s\n' "$*" >&2; exit 1; }
-note() { printf 'theme: %s\n' "$*"; }
+# EVERY message this tool prints passes through one of these two, so this is
+# where control bytes stop — not at whichever call sites someone remembered.
+# Filenames, paths, pywal's cached wallpaper record and contributor free text
+# from the Unsplash API all end up interpolated into messages, and any of them
+# can carry an OSC 52 clipboard write. Sanitizing per call site is how sinks
+# get missed; sanitizing here means a new `note` cannot introduce one.
+# display_text is defined below — order is irrelevant, every definition runs
+# before any call.
+die() { printf 'theme: %s\n' "$(display_text "$*")" >&2; exit 1; }
+note() { printf 'theme: %s\n' "$(display_text "$*")"; }
 dry() { [ -n "${THEME_NO_APPLY:-}" ]; }
 
 # --- small utilities -------------------------------------------------------
@@ -136,12 +144,21 @@ maybe_extend() { [ -n "$EXTEND" ] && extend_image "$1" "$EXTEND"; return 0; }
 
 # "3840x2160", or empty when the dimensions cannot be read.
 img_size() {
+    local size
     if command -v sips >/dev/null 2>&1; then
-        sips -g pixelWidth -g pixelHeight "$1" 2>/dev/null |
-            awk '/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{if (w) print w "x" h}'
+        size=$(sips -g pixelWidth -g pixelHeight "$1" 2>/dev/null |
+            awk '/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{if (w) print w "x" h}')
     else
-        file -b "$1" 2>/dev/null | grep -Eo '[0-9]+ ?x ?[0-9]+' | head -1 | tr -d ' '
+        size=$(file -b "$1" 2>/dev/null | grep -Eo '[0-9]+ ?x ?[0-9]+' | head -1 | tr -d ' ')
     fi
+    # Both readers scrape a tool that also echoes the FILENAME, so the shape is
+    # asserted rather than assumed: a size is digits, an x, digits — or it is
+    # nothing at all and every caller already renders that honestly.
+    case "$size" in
+    '' | *[!0-9x]* | x* | *x) printf '' ;;
+    *x*) printf '%s' "$size" ;;
+    *) printf '' ;;
+    esac
 }
 
 # i.pinimg.com/736x/... -> i.pinimg.com/originals/...  (identity for other hosts)
@@ -205,7 +222,7 @@ save_wallpaper() {
             SAVED="$dest"
             [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
                 xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
-            note "already have $(display_text "$(basename "$dest")") — reusing it"
+            note "already have $(basename "$dest") — reusing it"
             return 0
         fi
         [ "$n" -le 99 ] ||
@@ -219,7 +236,7 @@ save_wallpaper() {
     # the file itself. Read back by wall_source(); best-effort, never fatal.
     [ -n "$SOURCE_URL" ] && xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
     local size w; size=$(img_size "$dest"); w="${size%%x*}"
-    note "saved $(display_text "$(basename "$dest")")${size:+ ($size)}"
+    note "saved $(basename "$dest")${size:+ ($size)}"
     if [ -n "$w" ] && [ "$w" -lt "$MIN_WIDTH" ] 2>/dev/null; then
         note "warning: only ${w}px wide, below the ${MIN_WIDTH}px desktop floor"
     fi
@@ -500,7 +517,11 @@ cmd_unsplash_status() {
     limit=$(awk 'tolower($1)=="x-ratelimit-limit:"{sub("\r","",$2); print $2}' "$SCRATCH")
     remaining=$(awk 'tolower($1)=="x-ratelimit-remaining:"{sub("\r","",$2); print $2}' "$SCRATCH")
     scratch_done
-    [ -n "$limit" ] || die "Unsplash answered without rate-limit headers"
+    # Header values come off the wire; these two are printed as facts, so the
+    # shape is checked rather than trusted. A non-numeric limit is a broken or
+    # hostile answer, not a number to render.
+    case "$limit" in '' | *[!0-9]*) die "Unsplash answered without usable rate-limit headers" ;; esac
+    case "$remaining" in *[!0-9]*) remaining="" ;; esac
     printf 'requests left this hour:  %s/%s (resets on the hour)\n' "$remaining" "$limit"
     case "$limit" in
     50) printf 'tier:                     demo (50/hour; production raises it to 5000)\n' ;;
@@ -878,7 +899,7 @@ scheme_colors() {
 }
 
 cmd_status() {
-    local inc mode current desk colors
+    local inc mode current desk colors inc_d current_d desk_d
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
     case "$inc" in
     "") mode="unset" ;;
@@ -887,7 +908,14 @@ cmd_status() {
     esac
     current=$(cat "$WAL_CACHE/wal" 2>/dev/null)
     desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
-    printf 'current theme:   %s\n' "${desk:-${current:-<none>}}"
+    # This block prints with printf rather than note(), so it needs its own
+    # display copies. $current stays byte-exact — it is the path stat'ed and
+    # measured below; only what is SHOWN is sanitized. Every value here comes
+    # off disk: pywal's cached wallpaper record, the desktop's own answer, and
+    # the include line of current-theme.conf.
+    inc_d=$(display_text "$inc"); current_d=$(display_text "$current")
+    desk_d=$(display_text "$desk"); mode=$(display_text "$mode")
+    printf 'current theme:   %s\n' "${desk_d:-${current_d:-<none>}}"
     printf 'mode:            %s\n' "$mode"
     colors=$(scheme_colors)
     if [ -n "$colors" ]; then
@@ -898,10 +926,10 @@ cmd_status() {
     else
         printf 'color scheme:    <none>\n'
     fi
-    printf 'palette source:  %s\n' "${inc:-<none>}"
-    printf 'palette image:   %s%s\n' "${current:-<none>}" \
+    printf 'palette source:  %s\n' "${inc_d:-<none>}"
+    printf 'palette image:   %s%s\n' "${current_d:-<none>}" \
         "$( [ -n "$current" ] && [ -f "$current" ] && printf ' (%s)' "$(img_size "$current")")"
-    printf 'wallpaper dir:   %s (%s images)\n' "$WALLPAPER_DIR" \
+    printf 'wallpaper dir:   %s (%s images)\n' "$(display_text "$WALLPAPER_DIR")" \
         "$(find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null | wc -l | tr -d ' ')"
     printf 'variables:\n'
     if [ -n "${UNSPLASH_ACCESS_KEY:-}" ]; then
@@ -912,8 +940,8 @@ cmd_status() {
     else
         printf '  UNSPLASH_ACCESS_KEY   not set (theme unsplash --help)\n'
     fi
-    printf '  WALLPAPER_DIR         %s\n' "$WALLPAPER_DIR"
-    printf '  WAL_CACHE             %s\n' "$WAL_CACHE"
+    printf '  WALLPAPER_DIR         %s\n' "$(display_text "$WALLPAPER_DIR")"
+    printf '  WAL_CACHE             %s\n' "$(display_text "$WAL_CACHE")"
 }
 
 # Library-only resolver for DESTRUCTIVE commands (rm / rename). Unlike
@@ -955,7 +983,7 @@ cmd_rm() {
         img=$(resolve_library "$name") ||
             die "no wallpaper named '$name' in $WALLPAPER_DIR (rm takes library NAMES, never paths)"
         rm "$img" || die "could not delete $img"
-        note "successfully deleted \"$(display_text "$(basename "$img")")\""
+        note "successfully deleted \"$(basename "$img")\""
         [ "$img" = "$cur" ] && note "that was the current wallpaper — pick a new one with theme wal / theme set"
     done
     return 0
@@ -974,13 +1002,13 @@ cmd_rename() {
     base=$(slugify "$new")
     [ -n "$base" ] || die "that name slugifies to nothing — give it at least one letter or digit"
     dest="$(dirname "$img")/$base.${img##*.}"
-    [ "$dest" = "$img" ] && { note "already named $(display_text "$(basename "$img")")"; return 0; }
+    [ "$dest" = "$img" ] && { note "already named $(basename "$img")"; return 0; }
     # `-L` for the same reason as save_wallpaper: a dangling symlink is an
     # occupied name, not a free one.
     { [ -e "$dest" ] || [ -L "$dest" ]; } &&
-        die "$(display_text "$(basename "$dest")") already exists"
+        die "$(basename "$dest") already exists"
     mv "$img" "$dest" || die "rename failed"
-    note "successfully renamed \"$(display_text "$(basename "$img")")\" to \"$(display_text "$(basename "$dest")")\""
+    note "successfully renamed \"$(basename "$img")\" to \"$(basename "$dest")\""
     cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     if [ "$cur" = "$img" ]; then
         set_desktop "$dest"
@@ -1002,13 +1030,13 @@ usage() {
     *colors-kitty.conf) label="" ;;
     *) label="$(basename "${inc%.conf}")" ;;
     esac
-    printf '  current theme:      %s\n' "${desk:-<none>}"
+    printf '  current theme:      %s\n' "$(display_text "${desk:-<none>}")"
     colors=$(scheme_colors)
     if [ -n "$colors" ]; then
         printf '  colorscheme:        '
         # shellcheck disable=SC2046
         swatch_row $(printf '%s\n' "$colors" | head -8)
-        printf '%s\n' "${label:+ $label}"
+        printf '%s\n' "${label:+ $(display_text "$label")}"
     else
         printf '  colorscheme:        <none>\n'
     fi
@@ -1207,7 +1235,7 @@ EOF
         # A typo like `theme unplash --help` should SAY so, not silently
         # answer with the global usage as if the command existed — and it is
         # an ERROR, so the exit status says so too.
-        printf 'theme: unknown command %s — full usage:\n\n' "'$1'" >&2
+        printf 'theme: unknown command %s — full usage:\n\n' "'$(display_text "$1")'" >&2
         usage
         return 1
         ;;

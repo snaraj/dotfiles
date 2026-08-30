@@ -29,10 +29,14 @@
 #     corrupt entry degrades to that same dash with a silent stderr.
 #   - the filesystem-to-output boundary: a DANGLING symlink in the library is
 #     an occupied name rather than a free one, so a download can never be
-#     redirected through it; filenames reach the terminal as text and never as
-#     control protocol (an OSC 52 clipboard write in a name stays inert); and
-#     a provider label is decided by the parsed hostname, so a lookalike host
-#     cannot borrow a trusted source's provenance.
+#     redirected through it; and a provider label is decided by the parsed
+#     hostname, so a lookalike host cannot borrow a trusted source's
+#     provenance;
+#   - the terminal-output boundary, swept rather than enumerated: the whole
+#     command surface is driven with a filename, a cached wallpaper record and
+#     an API contributor name that each carry an OSC 52 clipboard write, and
+#     NO command may emit one — with positives proving the printable text
+#     survives and that the sweep really reached apply, status and listing.
 # Runs entirely in a throwaway directory; exits 0 on pass.
 set -u
 THEME="$(cd "$(dirname "$0")" && pwd)/theme.sh"
@@ -194,6 +198,7 @@ case "$url" in
 *api.unsplash.com/photos*)
     STUB_DESC="${STUB_DESC:-stub photo of a boundary test}" \
     STUB_DL="${STUB_DL:-https://api.unsplash.com/photos/stub123/download}" \
+    STUB_WHO="${STUB_WHO:-Stub}" \
         python3 -c 'import json, os, sys
 sys.stdout.write(json.dumps({
     "id": "stub123", "slug": "stub-photo-stub1234567",
@@ -201,7 +206,7 @@ sys.stdout.write(json.dumps({
     "width": 3840, "height": 2160,
     "urls": {"raw": "https://img.invalid/raw", "full": "https://img.invalid/full"},
     "links": {"download_location": os.environ["STUB_DL"]},
-    "user": {"name": "Stub"}}))'
+    "user": {"name": os.environ["STUB_WHO"]}}))'
     ;;
 *img.invalid/*)
     printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5CYII=' |
@@ -463,6 +468,113 @@ srccase "a SUFFIX-extended host is not unsplash"  srchost-suffix \
     "https://unsplash.com.evil.invalid/x" unsplash.com.evil.invalid
 srccase "userinfo cannot fake the host"           srchost-userinfo \
     "https://unsplash.com@evil.invalid/x" evil.invalid
+
+# --- NO command emits terminal control protocol, whatever disk or API says -
+# Round 10 sanitized the sinks that had been ENUMERATED; round 11 found three
+# more (theme set's apply notes, theme status' two path lines, and a remote
+# contributor name). Enumerating sinks is how sinks get missed, so this drives
+# the whole command surface with poisoned inputs and asserts on the OUTPUT,
+# which is the thing that actually has to be safe. A new command that prints an
+# untrusted value fails here with nobody remembering to add a case for it.
+sweeplib="$fixture/sweep"; sweepcache="$fixture/sweepcache"
+mkdir -p "$sweeplib" "$sweepcache/schemes"
+oscpay=$(printf '\033]52;c;T1ND\007')
+for stem in sweep-safe sweep-rm sweep-mv; do
+    printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$sweeplib/$stem$oscpay.png"
+done
+oscfile="$sweeplib/sweep-safe$oscpay.png"
+# pywal's record of the current wallpaper is a PATH read straight off disk, and
+# `theme status` prints it twice.
+printf '%s' "$oscfile" >"$sweepcache/wal"
+printf 'include %s/colors-kitty.conf\n' "$sweepcache" >"$sweepcache/current-theme.conf"
+# pywal's `colors` file is one #rrggbb per line. Getting this shape wrong makes
+# swatch_row abort mid-table and status never reaches the lines under test, so
+# the marker assertion below checks for `palette image:` by name.
+printf '#101010\n#202020\n#303030\n' >"$sweepcache/colors"
+xattr -w theme.source "https://example.invalid/x" "$oscfile" 2>/dev/null
+# `theme status` prefers the DESKTOP's own answer and only falls back to
+# pywal's cached record. On a machine with the `wallpaper` binary the real
+# desktop path wins and the crafted record is never printed — so the sweep
+# supplies a wallpaper stand-in that answers nothing, which is both the
+# deterministic case and the one the verdict described.
+sweepbin="$fixture/sweepbin"
+mkdir -p "$sweepbin"
+printf '#!/bin/bash\nexit 1\n' >"$sweepbin/wallpaper"
+chmod +x "$sweepbin/wallpaper"
+
+# A FOURTH sink, found by asking whether the img_size shape guard was
+# reachable rather than assuming it was: `sips` echoes the FILENAME before the
+# values it was asked for, so a name containing a newline injects an extra
+# `pixelWidth:` line into that output. For a file sips cannot measure there is
+# no real line afterwards to overwrite it, and the injected text became the
+# rendered size — in preview's SIZE column and status' palette line, both of
+# which printf directly rather than going through note().
+injname=$(printf 'sizeinject\n  pixelWidth: %s' "$oscpay")
+printf 'not an image' >"$sweeplib/$injname"
+
+sweep_all="$fixture/sweep.out"; : >"$sweep_all"
+sweep_bad=""
+sweep() { # $@ = theme arguments; records output, never fails the run
+    local o
+    o=$(WALLPAPER_DIR="$sweeplib" WAL_CACHE="$sweepcache" THEME_NO_APPLY=1 \
+        CONFIG_DIR="$sweepcache" KITTY_CONFIG_DIRECTORY="$sweepcache" COLUMNS=120 \
+        PATH="$sweepbin:$PATH" \
+        TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "$@" 2>&1)
+    printf '%s' "$o" | grep -qF -- "$osc_open" && sweep_bad="$sweep_bad [$1]"
+    printf '%s\n' "$o" >>"$sweep_all"
+    return 0
+}
+sweep help
+sweep status
+sweep list
+sweep list -v
+sweep preview sweep-safe
+sweep preview sizeinject
+sweep set sweep-safe
+sweep wal
+sweep rename sweep-mv renamed-by-sweep
+sweep rm sweep-rm
+sweep "unknown$oscpay"
+# A typo WITH --help takes a different branch: it printfs the bad command name
+# to stderr directly instead of going through die(), so it is its own sink and
+# the plain unknown-command case above does not cover it.
+sweep "unknown$oscpay" --help
+if [ -n "$sweep_bad" ]; then
+    fail "OSC reached the terminal from:$sweep_bad"
+else pass "no command emits a filename's OSC sequence"; fi
+# The sweep must not pass by doing nothing: these markers prove the apply
+# path, the status block and a listing actually ran and printed.
+# Markers, not vibes: each names a line only the surface in question prints,
+# and `palette image:` is the specific one the verdict pointed at — it sits
+# BELOW the swatch render, so it also proves status ran to completion.
+sweep_missing=""
+for marker in 'would set the desktop wallpaper to' 'would derive a palette from' \
+    'now: ' 'current theme:' 'palette image:' 'COLORSCHEME' 'sizeinject' \
+    'successfully deleted' 'successfully renamed' 'unknown command'; do
+    grep -qF -- "$marker" "$sweep_all" || sweep_missing="$sweep_missing [$marker]"
+done
+if [ -z "$sweep_missing" ]; then
+    pass "the sweep really reached every surface it claims to cover"
+else fail "the sweep never printed:$sweep_missing"; fi
+# And it must strip the control bytes, not the text around them.
+if grep -q 'sweep-safe' "$sweep_all"; then
+    pass "printable filename text survives every command"
+else fail "sanitizing removed the whole name, not just its control bytes"; fi
+
+# --- a CONTRIBUTOR name is remote free text under the same threat model -----
+STUB_WHO=$(printf 'Contributor\033]52;c;UkVNT1RF\007')
+export STUB_WHO
+wholog="$fixture/curl-who.log"; : >"$wholog"
+who_out=$(CURL_LOG="$wholog" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
+    WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
+    bash "$THEME" unsplash https://unsplash.com/photos/whoslug-abcdef12345 2>&1)
+unset STUB_WHO
+if printf '%s' "$who_out" | grep -qF -- "$osc_open"; then
+    fail "a contributor name emitted OSC through the credit note"
+else pass "a contributor name cannot emit OSC"; fi
+if printf '%s' "$who_out" | grep -q 'photo by Contributor'; then
+    pass "the contributor's printable name still shows"
+else fail "the credit note lost the contributor's name entirely"; fi
 
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "$fails FAILURES"; fi
 exit "$fails"
