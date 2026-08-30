@@ -185,10 +185,12 @@ call `set-colors` and nothing else — no window reads, no send-text, no
 launch. `kitten @ set-colors --all --configured`
 recolors existing windows *and* updates the instance's stored config, so
 windows opened later inherit the new palette too — no restart, no new window.
-A running instance ignores `SIGUSR1` on macOS, so the signal survives only as
-a fallback for instances started before the socket config existed; after
-pulling this config, quit and reopen kitty once so the instance carries the
-socket.
+The socket is the *only* path to a running instance: there is no `SIGUSR1`
+fallback. `SIGUSR1` makes kitty reload its entire config, which resets runtime
+state (font-size zoom, resized panes), and a theme change may touch colors
+only. An instance no socket reaches simply keeps its old palette until its
+next window reads the include — so after pulling this config, quit and reopen
+kitty once so the instance carries the socket.
 
 `kitten themes` (built into kitty) writes the same `current-theme.conf`, so the
 two coexist; `theme status` will report whatever is currently included.
@@ -230,6 +232,7 @@ Required:
 | `wallpaper` | `brew install wallpaper` | Setting the macOS desktop image |
 | `wal` (pywal) | `pipx install pywal` | Deriving the palette from an image |
 | `colorz`, `modern_colorthief` | `pipx inject pywal colorz modern_colorthief` | pywal backends — colorz first; modern_colorthief handles near-monochrome art colorz refuses |
+| ImageMagick (`magick`/`convert`) | `brew install imagemagick` / `apt install imagemagick` | pywal's `--contrast` palette floor — `theme set` fails without it |
 | `curl` | preinstalled | All downloads |
 | `python3` | preinstalled (or `brew install python`) | Parsing Unsplash JSON and `og:` meta tags |
 | `file`, `sed`, `awk`, `find`, `shasum` | preinstalled | Typing, slugifying, dedupe |
@@ -243,7 +246,7 @@ not be running — the reload is best-effort.
 **macOS**
 
 ```sh
-brew install wallpaper pipx
+brew install wallpaper pipx imagemagick
 pipx install pywal
 mkdir -p ~/.local/bin
 ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
@@ -259,7 +262,7 @@ recreate it with the `ln -sf` line above.
 The palette half works unchanged; the desktop half depends on the session:
 
 ```sh
-sudo apt install pipx curl file
+sudo apt install pipx curl file imagemagick
 pipx install pywal          # or: pip install --user pywal
 ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
 ```

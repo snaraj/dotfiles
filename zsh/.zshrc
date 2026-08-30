@@ -10,28 +10,9 @@ bindkey -e
 # History behavior: write each command as it runs, drop duplicates
 setopt INC_APPEND_HISTORY HIST_IGNORE_ALL_DUPS
 
-# Completions. kubectl/helm are pre-generated into fpath instead of
-# `source <(... completion zsh)`, which spawned two subprocesses on every
-# shell start; the cache regenerates itself when a binary is newer than it.
-fpath=($ZDOTDIR/completions $fpath)
-for _t in kubectl helm; do
-    if (( $+commands[$_t] )) && [[ ! -e $ZDOTDIR/completions/_$_t || ${commands[$_t]} -nt $ZDOTDIR/completions/_$_t ]]; then
-        mkdir -p $ZDOTDIR/completions
-        $_t completion zsh > $ZDOTDIR/completions/_$_t
-    fi
-done
-unset _t
-autoload -Uz compinit
-# full security scan at most once a day; -C trusts the cached dump otherwise
-if [[ -n $ZDOTDIR/.zcompdump(#qN.mh-24) ]]; then
-    compinit -C
-else
-    compinit
-    # compinit leaves the dump untouched when it is already valid; refresh the
-    # mtime or the 24h fast path above never re-arms and every shell rescans
-    touch $ZDOTDIR/.zcompdump
-fi
-zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+# Completion cache + the once-a-day compinit security audit. Its own file so
+# zsh/completion-security-tests.zsh can exercise the shipped code directly.
+source $ZDOTDIR/completion-init.zsh
 
 # Auto Suggestions — type to see the inline history suggestion; RIGHT ARROW
 # accepts it, UP/DOWN substring-search history for what you typed (below).

@@ -34,7 +34,7 @@ gitignored.
 ```sh
 git clone https://github.com/snaraj/dotfiles.git ~/.config
 cp ~/.config/zsh/zshenv ~/.zshenv
-brew install kitty starship neovim eza kubernetes-cli helm wallpaper pipx
+brew install kitty starship neovim eza kubernetes-cli helm wallpaper pipx imagemagick
 pipx install pywal
 mkdir -p ~/.config/zsh/plugins && cd ~/.config/zsh/plugins
 git clone https://github.com/zsh-users/zsh-autosuggestions
@@ -52,7 +52,7 @@ Single item instead: take just its folder plus the matching lines of
 Same clone + zshenv + plugins as above, then:
 
 ```sh
-sudo apt install zsh kitty neovim eza curl python3-pip pipx
+sudo apt install zsh kitty neovim eza curl python3-pip pipx imagemagick
 curl -sS https://starship.rs/install.sh | sh
 pipx install pywal
 chsh -s "$(which zsh)"

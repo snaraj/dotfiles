@@ -286,14 +286,25 @@ set_desktop() {
 set_palette() {
     dry && { note "[no-apply] would derive a palette from $1"; return 0; }
     command -v wal >/dev/null 2>&1 || die "pywal not installed (pipx install pywal)"
+    # --contrast below is implemented through ImageMagick averaging (pywal calls
+    # magick, or convert on older builds). Without it all three rungs fail the
+    # same way and the only message is a generic "pywal failed"; check once, up
+    # front, and say what to install.
+    command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 ||
+        die "ImageMagick not installed (brew install imagemagick / apt install imagemagick) — required for the --contrast palette floor"
     # colorz refuses near-monochrome art ("not enough colors");
     # modern_colorthief (pipx inject pywal modern_colorthief) handles those.
     # --contrast 3.0 floors accent-vs-background contrast (needs imagemagick);
     # dark art otherwise yields ~1.6:1 accents — invisible typed text. A 3.0
     # request lands ~4.5:1 measured while staying in the image's hue family.
-    wal -i "$1" --backend colorz --contrast 3.0 >/dev/null 2>&1 ||
-        wal -i "$1" --backend modern_colorthief --contrast 3.0 >/dev/null 2>&1 ||
-        wal -i "$1" --contrast 3.0 >/dev/null 2>&1 ||
+    # -s -t -e: derivation + cache export ONLY. pywal's live-reload otherwise
+    # sprays Linux-console/urxvt escapes (ESC]P…, OSC 708) into EVERY open
+    # tty — kitty misparses them (tab title became the palette bytes) — and
+    # runs its own kitty reload; reload_kitty below is the one sanctioned
+    # path to a live terminal, and it touches colors only.
+    wal -i "$1" -s -t -e --backend colorz --contrast 3.0 >/dev/null 2>&1 ||
+        wal -i "$1" -s -t -e --backend modern_colorthief --contrast 3.0 >/dev/null 2>&1 ||
+        wal -i "$1" -s -t -e --contrast 3.0 >/dev/null 2>&1 ||
         die "pywal failed on $1"
     [ -f "$WAL_CACHE/colors-kitty.conf" ] ||
         die "pywal wrote no kitty colors in $WAL_CACHE — point WAL_CACHE at pywal's own cache dir"
