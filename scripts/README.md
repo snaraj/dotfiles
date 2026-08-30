@@ -36,7 +36,8 @@ theme url <link>         # direct image URL or Pinterest pin -> save + apply
 theme … --rotate left|right   # any image command: turn 90° before applying
 theme … --extend[=RRGGBB]     # pad flat-background art to screen shape (default 000000)
 theme list               # local wallpapers and static themes
-theme status             # current mode, wallpaper, palette source
+theme status             # current theme: mode, color-scheme swatches, variables
+theme rename <w> <n…>    # rename a saved wallpaper (slugified, extension kept)
 ```
 
 `wal`, `random` and `set` are the same code path; `random`/`set` exist because

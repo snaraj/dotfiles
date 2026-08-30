@@ -395,8 +395,33 @@ cmd_list() {
     static_themes | sed 's/^/  /'
 }
 
+# Print the 16 palette colors as truecolor blocks, 8 per row — the same
+# at-a-glance scheme preview kitty/nvim theme pickers give.
+swatch_row() { # $@ = hex colors (with or without #)
+    local c r g b i=0 total=$#
+    for c in "$@"; do
+        c="${c#\#}"
+        r=$((16#${c:0:2})); g=$((16#${c:2:2})); b=$((16#${c:4:2}))
+        printf '\033[48;2;%d;%d;%dm   \033[0m ' "$r" "$g" "$b"
+        i=$((i + 1))
+        [ $((i % 8)) -eq 0 ] && [ "$i" -lt "$total" ] && printf '\n                 '
+    done
+    return 0
+}
+
+# The 16 colors of the active scheme, one hex per line — pywal cache or a
+# static kitty theme file, whichever current-theme.conf points at.
+scheme_colors() {
+    local inc
+    inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
+    case "$inc" in
+    *colors-kitty.conf) cat "$WAL_CACHE/colors" 2>/dev/null ;;
+    ?*) awk '/^color([0-9]|1[0-5]) /{print $2}' "$inc" 2>/dev/null | head -16 ;;
+    esac
+}
+
 cmd_status() {
-    local inc mode current desk
+    local inc mode current desk colors
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
     case "$inc" in
     "") mode="unset" ;;
@@ -404,14 +429,62 @@ cmd_status() {
     *) mode="static ($(basename "${inc%.conf}"))" ;;
     esac
     current=$(cat "$WAL_CACHE/wal" 2>/dev/null)
-    desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#')
+    desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+    printf 'current theme:   %s\n' "${desk:-${current:-<none>}}"
     printf 'mode:            %s\n' "$mode"
+    colors=$(scheme_colors)
+    if [ -n "$colors" ]; then
+        printf 'color scheme:    '
+        # shellcheck disable=SC2046
+        swatch_row $(printf '%s\n' "$colors")
+        printf '\n'
+    else
+        printf 'color scheme:    <none>\n'
+    fi
     printf 'palette source:  %s\n' "${inc:-<none>}"
     printf 'pywal image:     %s%s\n' "${current:-<none>}" \
         "$( [ -n "$current" ] && [ -f "$current" ] && printf ' (%s)' "$(img_size "$current")")"
-    printf 'desktop image:   %s\n' "${desk:-<unknown on this platform>}"
     printf 'wallpaper dir:   %s (%s images)\n' "$WALLPAPER_DIR" \
         "$(find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null | wc -l | tr -d ' ')"
+    printf 'variables:\n'
+    if [ -n "${UNSPLASH_ACCESS_KEY:-}" ]; then
+        printf '  UNSPLASH_ACCESS_KEY   set (env)\n'
+    elif command -v security >/dev/null 2>&1 &&
+        security find-generic-password -s unsplash-access-key -w >/dev/null 2>&1; then
+        printf '  UNSPLASH_ACCESS_KEY   set (Keychain: unsplash-access-key)\n'
+    else
+        printf '  UNSPLASH_ACCESS_KEY   not set (theme unsplash --help)\n'
+    fi
+    printf '  WALLPAPER_DIR         %s\n' "$WALLPAPER_DIR"
+    printf '  WAL_CACHE             %s\n' "$WAL_CACHE"
+}
+
+# Rename a wallpaper, keeping the library's naming format (slug + original
+# extension). If it is the CURRENT wallpaper, the desktop is re-pointed so the
+# rename never breaks what is on screen.
+cmd_rename() {
+    local img new base dest cur
+    img=$(resolve_local "$1") || die "no such wallpaper '$1' (looked in $WALLPAPER_DIR)"
+    shift
+    new="$*"
+    [ -n "$new" ] || die "usage: theme rename <wallpaper> <new name…>   (see theme rename --help)"
+    base=$(slugify "$new")
+    [ -n "$base" ] || die "that name slugifies to nothing — give it at least one letter or digit"
+    dest="$(dirname "$img")/$base.${img##*.}"
+    [ "$dest" = "$img" ] && { note "already named $(basename "$img")"; return 0; }
+    [ -e "$dest" ] && die "$(basename "$dest") already exists"
+    mv "$img" "$dest" || die "rename failed"
+    note "renamed $(basename "$img") -> $(basename "$dest")"
+    cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+    if [ "$cur" = "$img" ]; then
+        set_desktop "$dest"
+        note "desktop re-pointed at the new name"
+    fi
+    # Keep pywal's record accurate too, so `theme status` stays truthful.
+    if [ "$(cat "$WAL_CACHE/wal" 2>/dev/null)" = "$img" ]; then
+        printf '%s' "$dest" >"$WAL_CACHE/wal" 2>/dev/null || true
+    fi
+    return 0
 }
 
 usage() {
@@ -427,8 +500,9 @@ theme — wallpaper + terminal palette
   theme url <link>       direct image URL or Pinterest pin: download, save, apply
                          (pinimg /NNNx/ downscales auto-upgrade to /originals/)
   theme list             local wallpapers and static themes
-  theme status           current mode, wallpaper, and palette source
-  theme help             this text
+  theme status           current theme, color-scheme swatches, variables
+  theme rename <w> <n…>  rename a saved wallpaper, keeping the naming format
+  theme help             this text  (theme <command> --help = per-command help)
 
   --rotate left|right    turn the image 90° first (any image command) — portrait
                          pins become landscape; desktop is set in fill mode
@@ -446,20 +520,37 @@ EOF
 usage_cmd() {
     case "$1" in
     wal) cat <<EOF
-theme wal [image]
+theme wal [image] [--rotate left|right] [--extend[=RRGGBB]]
 
   Derive a pywal palette from a local image and apply it everywhere:
   desktop wallpaper + kitty recolor (live windows and future ones).
   [image] is a path or a name under $WALLPAPER_DIR (extension optional).
   No image = a random local wallpaper.
+
+  Examples:
+    theme wal                          # random local wallpaper
+    theme wal night-sky-city-blue-lights
+    theme wal ~/Downloads/pic.jpg --rotate right
 EOF
         ;;
-    random) printf 'theme random\n\n  Same as `theme wal` with no image: random local wallpaper, applied.\n' ;;
+    random) cat <<EOF
+theme random
+
+  Same as \`theme wal\` with no image: random local wallpaper, applied.
+
+  Example:
+    theme random
+EOF
+        ;;
     set) cat <<EOF
-theme set <image>
+theme set <image> [--rotate left|right] [--extend[=RRGGBB]]
 
   Apply a specific local wallpaper: desktop + pywal palette + kitty.
   <image> is a path or a name under $WALLPAPER_DIR (extension optional).
+
+  Examples:
+    theme set spain-city-mountains
+    theme set nebulosa-red.png --extend
 EOF
         ;;
     static) cat <<EOF
@@ -467,6 +558,10 @@ theme static [name]
 
   Switch kitty to a fixed theme from $THEMES_DIR (no pywal, wallpaper
   untouched). Default: catppuccin-mocha. Available: $(static_themes | paste -sd' ' -)
+
+  Examples:
+    theme static                       # catppuccin-mocha
+    theme static catppuccin-mocha
 EOF
         ;;
     unsplash) cat <<EOF
@@ -476,9 +571,14 @@ theme unsplash [query…]
   into $WALLPAPER_DIR — named from your query plus the photo's own
   description — then apply it (desktop + pywal + kitty).
 
-  The query needs no quotes:  theme unsplash neon city rain
-  No query = fully random. Needs UNSPLASH_ACCESS_KEY or the
-  'unsplash-access-key' Keychain item (see scripts/README.md).
+  The query needs no quotes. No query = fully random. Needs
+  UNSPLASH_ACCESS_KEY or the 'unsplash-access-key' Keychain item
+  (see scripts/README.md).
+
+  Examples:
+    theme unsplash                     # surprise me
+    theme unsplash neon city rain
+    theme unsplash mountain lake sunrise --rotate right
 EOF
         ;;
     url) cat <<EOF
@@ -491,10 +591,47 @@ theme url <link> [--rotate left|right]
   the full-resolution /originals/ variant when it exists, and the desktop
   is set in fill mode (crop to cover — never letterbox bars).
   --rotate turns a portrait pin 90° into a landscape before applying.
+  --extend centres flat-background art on a matching-color canvas instead.
+
+  Examples:
+    theme url https://www.pinterest.com/pin/300685712645323833/
+    theme url https://i.pinimg.com/1200x/39/76/d8/3976d….jpg --rotate right
+    theme url https://i.pinimg.com/736x/cc/a1/35/cca13….jpg --extend
 EOF
         ;;
-    list) printf 'theme list\n\n  List local wallpapers and static kitty themes.\n' ;;
-    status) printf 'theme status\n\n  Show current mode (pywal/static), wallpaper, and palette source.\n' ;;
+    list) cat <<EOF
+theme list
+
+  List local wallpapers and static kitty themes.
+
+  Example:
+    theme list
+EOF
+        ;;
+    status) cat <<EOF
+theme status
+
+  Show the current theme: wallpaper path, mode (pywal/static), the color
+  scheme as truecolor swatches (like nvim/kitty theme pickers), palette
+  source, and the variables the CLI reads (Unsplash key presence — never
+  the value — wallpaper dir, pywal cache).
+
+  Example:
+    theme status
+EOF
+        ;;
+    rename) cat <<EOF
+theme rename <wallpaper> <new name…>
+
+  Rename a saved wallpaper, keeping the library's naming format (the new
+  name is slugified, the extension stays). The new name needs no quotes.
+  If it is the current wallpaper, the desktop is re-pointed automatically.
+
+  Examples:
+    theme rename pinterest-20260829-181509-extended.jpg red-samurai-poster
+    theme rename starry-boat-3840x2160-v0-uyzg0992aegb1 starry boat painting
+EOF
+        ;;
     help | '') usage ;;
     *)
         # A typo like `theme unplash --help` should SAY so, not silently
@@ -560,6 +697,7 @@ unsplash) shift; cmd_unsplash "$*" ;;
 url) cmd_url "${2:-}" ;;
 list) cmd_list ;;
 status) cmd_status ;;
+rename) shift; [ -n "${1:-}" ] || die "usage: theme rename <wallpaper> <new name…>"; cmd_rename "$@" ;;
 help | -h | --help) usage ;;
 *) usage >&2; die "unknown command '$1'" ;;
 esac
