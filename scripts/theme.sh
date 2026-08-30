@@ -459,19 +459,40 @@ cmd_status() {
     printf '  WAL_CACHE             %s\n' "$WAL_CACHE"
 }
 
-# Delete wallpapers by NAME (resolved like `set`/`rename` — no path needed).
-# Only files inside the library are deletable; `theme rm` never touches
-# arbitrary paths. Deleting the on-screen wallpaper is allowed — macOS keeps
-# its cached copy up until the next `theme` run.
+# Library-only resolver for DESTRUCTIVE commands (rm / rename). Unlike
+# resolve_local it takes bare NAMES only — any path separator is refused, so
+# `..`, absolute paths, and nested paths can never reach a destructive verb —
+# and the match is re-checked by canonical physical path (symlink-proof).
+resolve_library() {
+    local cand="" f real dirreal
+    case "$1" in
+    */* | .* ) return 1 ;;
+    esac
+    if [ -f "$WALLPAPER_DIR/$1" ]; then
+        cand="$WALLPAPER_DIR/$1"
+    else
+        for f in "$WALLPAPER_DIR/$1".*; do
+            [ -f "$f" ] && { cand="$f"; break; }
+        done
+    fi
+    [ -n "$cand" ] || return 1
+    dirreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) || return 1
+    real=$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P) || return 1
+    [ "$real" = "$dirreal" ] || return 1
+    printf '%s' "$cand"
+    return 0
+}
+
+# Delete wallpapers by NAME. Destructive, so names only — never paths: the
+# library-only resolver refuses separators, `..`, absolute paths, and
+# out-of-library symlink targets. Deleting the on-screen wallpaper is allowed —
+# macOS keeps its cached copy up until the next `theme` run.
 cmd_rm() {
     local name img cur
     cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     for name in "$@"; do
-        img=$(resolve_local "$name") || die "no such wallpaper '$name' (looked in $WALLPAPER_DIR)"
-        case "$img" in
-        "$WALLPAPER_DIR"/*) ;;
-        *) die "'$name' resolves outside the wallpaper library ($img) — rm only deletes library files" ;;
-        esac
+        img=$(resolve_library "$name") ||
+            die "no wallpaper named '$name' in $WALLPAPER_DIR (rm takes library NAMES, never paths)"
         rm "$img" || die "could not delete $img"
         note "successfully deleted \"$(basename "$img")\""
         [ "$img" = "$cur" ] && note "that was the current wallpaper — pick a new one with theme wal / theme set"
@@ -484,7 +505,8 @@ cmd_rm() {
 # rename never breaks what is on screen.
 cmd_rename() {
     local img new base dest cur
-    img=$(resolve_local "$1") || die "no such wallpaper '$1' (looked in $WALLPAPER_DIR)"
+    img=$(resolve_library "$1") ||
+        die "no wallpaper named '$1' in $WALLPAPER_DIR (rename takes library NAMES, never paths)"
     shift
     new="$*"
     [ -n "$new" ] || die "usage: theme rename <wallpaper> <new name…>   (see theme rename --help)"
