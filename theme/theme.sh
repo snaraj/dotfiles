@@ -289,9 +289,12 @@ set_palette() {
     command -v wal >/dev/null 2>&1 || die "pywal not installed (pipx install pywal)"
     # colorz refuses near-monochrome art ("not enough colors");
     # modern_colorthief (pipx inject pywal modern_colorthief) handles those.
-    wal -i "$1" --backend colorz >/dev/null 2>&1 ||
-        wal -i "$1" --backend modern_colorthief >/dev/null 2>&1 ||
-        wal -i "$1" >/dev/null 2>&1 ||
+    # --contrast 3.0 floors accent-vs-background contrast (needs imagemagick);
+    # dark art otherwise yields ~1.6:1 accents — invisible typed text. A 3.0
+    # request lands ~4.5:1 measured while staying in the image's hue family.
+    wal -i "$1" --backend colorz --contrast 3.0 >/dev/null 2>&1 ||
+        wal -i "$1" --backend modern_colorthief --contrast 3.0 >/dev/null 2>&1 ||
+        wal -i "$1" --contrast 3.0 >/dev/null 2>&1 ||
         die "pywal failed on $1"
     [ -f "$WAL_CACHE/colors-kitty.conf" ] ||
         die "pywal wrote no kitty colors in $WAL_CACHE — point WAL_CACHE at pywal's own cache dir"
