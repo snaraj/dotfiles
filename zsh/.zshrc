@@ -27,6 +27,9 @@ if [[ -n $ZDOTDIR/.zcompdump(#qN.mh-24) ]]; then
     compinit -C
 else
     compinit
+    # compinit leaves the dump untouched when it is already valid; refresh the
+    # mtime or the 24h fast path above never re-arms and every shell rescans
+    touch $ZDOTDIR/.zcompdump
 fi
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
 
@@ -62,3 +65,15 @@ bindkey -M emacs '^[OB' history-substring-search-down
 zmodload -i zsh/terminfo
 [[ -n "${terminfo[kcuu1]-}" ]] && bindkey -M emacs -- "${terminfo[kcuu1]}" history-substring-search-up
 [[ -n "${terminfo[kcud1]-}" ]] && bindkey -M emacs -- "${terminfo[kcud1]}" history-substring-search-down
+
+# Keys kitty sends that zsh leaves unbound — without these, Home/End do
+# nothing and fn+delete inserts a literal '~' into the line.
+bindkey -M emacs '^[[H'    beginning-of-line   # Home
+bindkey -M emacs '^[[F'    end-of-line         # End
+bindkey -M emacs '^[[3~'   delete-char         # fn+delete (forward delete)
+bindkey -M emacs '^[[1;3D' backward-word       # option+left
+bindkey -M emacs '^[[1;3C' forward-word        # option+right
+bindkey -M emacs '^[[1;5D' backward-word       # ctrl+left
+bindkey -M emacs '^[[1;5C' forward-word        # ctrl+right
+# Word-jumps stop at path separators instead of leaping whole paths
+WORDCHARS=${WORDCHARS//\//}

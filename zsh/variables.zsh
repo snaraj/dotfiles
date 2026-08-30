@@ -13,9 +13,6 @@ export FIREFOX_USER_CHROME="/Users/samuel/Library/Application Support/Firefox/Pr
 # kitty reads this env var to locate its config directory
 export KITTY_CONFIG_DIRECTORY=$CONFIG_DIR/kitty
 
-# scripts directory (theme command and others)
-export SCRIPTS_DIR=$CONFIG_DIR/scripts
-
 # pywal output cache (used by theme.sh for colors-kitty.conf)
 export WAL_CACHE=$HOME/.cache/wal
 
