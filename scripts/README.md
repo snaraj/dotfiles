@@ -12,8 +12,8 @@ This is the detailed reference — the repo root README deliberately stays short
 One command owns two things that should always agree:
 
 - the **desktop wallpaper** (via the `wallpaper` brew formula on macOS), and
-- the **terminal palette**, either derived from that wallpaper with
-  [pywal](https://github.com/dylanaraps/pywal) or pinned to a static kitty theme.
+- the **terminal palette**, derived from that wallpaper with
+  [pywal](https://github.com/dylanaraps/pywal).
 
 It can also *fetch* new wallpapers — from Unsplash or from any image URL or
 Pinterest pin — save them into the wallpaper library with a readable filename,
@@ -28,13 +28,19 @@ theme wal                # random local wallpaper -> desktop + pywal colors
 theme wal <image>        # specific local image  -> desktop + pywal colors
 theme random             # explicit name for `theme wal` with no argument
 theme set <image>        # explicit name for `theme wal <image>`
-theme static             # static kitty theme (default: catppuccin-mocha)
-theme static <name>      # any file in ~/.config/kitty/themes/<name>.conf
 theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
+theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
+theme unsplash status    # API window: requests left this hour, tier, key
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
-theme list               # local wallpapers and static themes
-theme status             # current mode, wallpaper, palette source
+theme … --rotate left|right   # any image command: turn 90° before applying
+theme … --extend[=RRGGBB]     # pad flat-background art to screen shape (default 000000)
+theme list [-v]          # wallpaper table, latest added first: title +
+                         #   colorscheme render (-v adds source, format,
+                         #   size, date added)
+theme status             # current theme: mode, color-scheme swatches, variables
+theme rename <w> <n…>    # rename a saved wallpaper (slugified, extension kept)
+theme rm <w…>            # delete saved wallpapers by name (library only)
 ```
 
 `wal`, `random` and `set` are the same code path; `random`/`set` exist because
@@ -51,13 +57,13 @@ theme set ~/Pictures/screenshot-4k.png       # any path outside the library
 # Shuffle
 theme random
 
-# Pin the terminal to a fixed scheme, leaving the desktop alone
-theme static catppuccin-mocha
-
 # Pull something new from Unsplash (needs a free key, see below)
 theme unsplash
 theme unsplash "misty forest"
 theme unsplash "brutalist architecture"
+
+# Or exactly the photo you are looking at — paste its page link
+theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
 
 # Any direct image URL
 theme url https://upload.wikimedia.org/wikipedia/commons/1/12/Andromeda.jpg
@@ -85,22 +91,33 @@ checks before anything is applied:
    to resolve to a real image via its `og:image` meta tag (this is how
    Pinterest pins work) — after that it is an error.
 2. **Named descriptively.** The filename is slugified from the best hint
-   available: the Unsplash photo slug plus photographer, the page's `og:title`,
-   or the URL basename. Junk names like `.../3840/2160.jpg` fall back to the
-   whole host-and-path so the file is still identifiable.
+   available: your search prompt plus the photo's own description (Unsplash),
+   the page's `og:title`, or the URL basename — long names cut at a word
+   boundary. Bare CDN-hash basenames become `pinterest-<timestamp>`. The
+   photographer is credited in the terminal note, never baked into the name.
 3. **Never overwrites.** If the target name already exists and the bytes are
    identical, the existing file is reused and nothing is downloaded again. If
    the bytes differ, the new file takes the next free `-2`, `-3`, … suffix. An
    existing file is never modified.
 4. **Warns when small.** Anything narrower than 2560px is saved and applied,
    but says so.
+5. **Highest rendition wins.** Unsplash downloads use the `raw` URL — the
+   untouched original upload — never the `full` q=85 re-compressed jpg;
+   Pinterest `/NNNx/` downscales are upgraded to `/originals/` when it exists.
 
 Pinterest specifically: pin pages expose only a `736x`-wide preview in their
-`og:image`. `theme` rewrites `i.pinimg.com/736x/...` to
+`og:image`. `theme` rewrites any `i.pinimg.com/<width>x/...` downscale —
+whether it came from a pin page or was pasted directly — to
 `i.pinimg.com/originals/...` to get the uploaded original, and falls back to
-the preview URL if the originals path is not there. Pins whose source upload
+the given URL if the originals path is not there. Pins whose source upload
 was small stay small — that is Pinterest's copy, not a bug here, and the width
 warning will tell you.
+
+Portrait pins: add `--rotate left|right` (any position, any image command) to
+turn the image 90° before it is saved and applied. Rotating a local-library
+image saves the turned copy as its own wallpaper — the original file is never
+modified. The desktop is always set in fill mode: crop to cover the screen,
+never letterbox bars.
 
 ### Unsplash setup (free)
 
@@ -144,36 +161,34 @@ Implementation notes worth knowing:
 - After a successful download it pings the photo's `download_location`
   endpoint. That is an Unsplash API guideline requirement (it credits the
   photographer's download count) and costs nothing.
-- The photographer's name is printed on success and baked into the filename.
-  If you republish one of these images anywhere, attribute them.
+- The photographer's name is printed on success (the filename carries your
+  prompt and the photo's description instead). If you republish one of these
+  images anywhere, attribute them.
 
 ### How the kitty include chain works
 
 ```
 ~/.config/kitty/kitty.conf
       └── include current-theme.conf          (gitignored; rewritten by `theme`)
-                 └── include ~/.cache/wal/colors-kitty.conf     ← pywal mode
-                     or     ~/.config/kitty/themes/<name>.conf  ← static mode
+                 └── include ~/.cache/wal/colors-kitty.conf
 ```
 
-`theme` only ever rewrites the one-line `current-theme.conf`, then sends
-`SIGUSR1` to running kitty processes — kitty re-reads `kitty.conf` and all its
-includes in place, so colors change live with no restart and no new window.
+`theme` only ever rewrites the one-line `current-theme.conf`, then pushes the
+new colors to every running kitty instance over its remote-control socket.
+The socket's authority is capability-scoped, not open: `kitty.conf` sets
+`allow_remote_control password`, `listen_on unix:/tmp/kitty-samuel`, and
+`remote_control_password "" set-colors`, so a passwordless socket client may
+call `set-colors` and nothing else — no window reads, no send-text, no
+launch. `kitten @ set-colors --all --configured`
+recolors existing windows *and* updates the instance's stored config, so
+windows opened later inherit the new palette too — no restart, no new window.
+A running instance ignores `SIGUSR1` on macOS, so the signal survives only as
+a fallback for instances started before the socket config existed; after
+pulling this config, quit and reopen kitty once so the instance carries the
+socket.
 
 `kitten themes` (built into kitty) writes the same `current-theme.conf`, so the
 two coexist; `theme status` will report whatever is currently included.
-
-### Adding static themes
-
-Drop any kitty color `.conf` into `~/.config/kitty/themes/`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/catppuccin/kitty/main/themes/latte.conf \
-  -o ~/.config/kitty/themes/catppuccin-latte.conf
-theme static catppuccin-latte
-```
-
-It shows up in `theme list` and `theme help` immediately.
 
 ### Environment variables
 
@@ -211,13 +226,14 @@ Required:
 | --- | --- | --- |
 | `wallpaper` | `brew install wallpaper` | Setting the macOS desktop image |
 | `wal` (pywal) | `pipx install pywal` | Deriving the palette from an image |
+| `colorz`, `modern_colorthief` | `pipx inject pywal colorz modern_colorthief` | pywal backends — colorz first; modern_colorthief handles near-monochrome art colorz refuses |
 | `curl` | preinstalled | All downloads |
 | `python3` | preinstalled (or `brew install python`) | Parsing Unsplash JSON and `og:` meta tags |
 | `file`, `sed`, `awk`, `find`, `shasum` | preinstalled | Typing, slugifying, dedupe |
 
 Optional: `sips` (macOS, preinstalled) gives exact image dimensions; without it
 `file` is used, which is slightly less reliable on exotic formats. `kitty` need
-not be running — the reload is a best-effort signal.
+not be running — the reload is best-effort.
 
 ### Fresh machine
 
@@ -264,6 +280,6 @@ matrix here, and macOS is the supported target.
 | `warning: only NNNpx wide` | The source really is that small. It was still saved and applied. |
 | `pywal not installed` | `pipx install pywal`, then reopen the shell so `~/.local/bin/wal` is on `PATH`. |
 | `pywal wrote no kitty colors in ...` | `WAL_CACHE` and pywal's actual cache disagree. Unset `WAL_CACHE` or point it at `~/.cache/wal`. |
-| Colors don't change | kitty was not running when the signal was sent, or `kitty.conf` no longer has `include current-theme.conf`. `theme status` shows what is included. |
+| Colors don't change | The kitty instance predates the socket config — quit and reopen kitty once — or `kitty.conf` no longer has `include current-theme.conf`. `theme status` shows what is included. |
 | Desktop doesn't change but colors do | `wallpaper` is not installed (`brew install wallpaper`) or the platform is unsupported. |
 | Two files with `-2` suffixes | Two different images wanted the same slug. Both were kept on purpose; delete whichever you don't want. |
