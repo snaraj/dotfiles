@@ -533,6 +533,9 @@ wall_source() { # $1 file
         src=$(mdls -raw -name kMDItemWhereFroms "$1" 2>/dev/null |
             sed -n 's/^[[:space:]]*"\([^"]*\)".*$/\1/p' | head -1)
     fi
+    # The xattr is data from disk, not trusted layout input: control bytes
+    # (newlines, escapes) could otherwise reach the aligned tables raw.
+    src=$(printf '%s' "$src" | tr -d '[:cntrl:]')
     case "$src" in
     '' | '(null)') printf -- '-' ;;
     *unsplash.com*) printf 'unsplash' ;;
@@ -669,6 +672,9 @@ cmd_list() {
             [ "$n" -gt 0 ] && [ -n "$VERBOSE" ] && { while [ "$n" -lt 8 ]; do printf '   '; n=$((n + 1)); done; }
             if [ -n "$VERBOSE" ]; then
                 src=$(wall_source "$f")
+                # The SOURCE field is 10 wide; a longer custom host would
+                # push every later column out of line.
+                [ "${#src}" -gt 10 ] && src="$(printf '%.9s' "$src")…"
                 fmt="${f##*.}"
                 bytes=$(stat -f %z "$f" 2>/dev/null || printf 0)
                 bytes=$(awk -v b="$bytes" 'BEGIN{ if (b >= 1048576) printf "%.1fM", b/1048576; else printf "%.0fK", b/1024 }')
@@ -718,6 +724,9 @@ cmd_preview() { # $1 optional wallpaper name/path
     availw=$((cols - 22 - 13))
     [ "$availw" -lt 12 ] && availw=12
     [ "${#name}" -gt "$availw" ] && name="$(printf '%.*s' $((availw - 1)) "$name")…"
+    # EVERY value in the aligned block is bounded, not just the title — a
+    # custom download host in the source xattr is arbitrary-length too.
+    [ "${#src}" -gt "$availw" ] && src="$(printf '%.*s' $((availw - 1)) "$src")…"
     local rlines=(
         ""
         "$(printf '%-12s %s' TITLE "$name")"
