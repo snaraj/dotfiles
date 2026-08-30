@@ -707,15 +707,26 @@ cmd_preview() { # $1 optional wallpaper name/path
         sw="$sw$(printf '\033[48;2;%d;%d;%dm    \033[0m ' "$r" "$g" "$b")"
     done
     [ -n "$sw" ] || sw='-'
+    # Values must FIT the right-hand column — a wrapped line lands at column
+    # 0 and shreds the whole block — so the title truncates with … (a
+    # truncated title still resolves via prefix match). LOCATION gets its own
+    # full-width line under the block instead: paths are the one value too
+    # long to truncate honestly, and down there a narrow window wraps nothing
+    # that has to stay aligned.
+    local cols availw
+    cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
+    availw=$((cols - 22 - 13))
+    [ "$availw" -lt 12 ] && availw=12
+    [ "${#name}" -gt "$availw" ] && name="$(printf '%.*s' $((availw - 1)) "$name")…"
     local rlines=(
         ""
         "$(printf '%-12s %s' TITLE "$name")"
-        "$(printf '%-12s %s' LOCATION "$loc")"
         "$(printf '%-12s %s' SOURCE "$src")"
         "$(printf '%-12s %s' SIZE "${dims:-?}${bytes:+ ($bytes)}")"
         ""
         "COLORSCHEME"
         "$sw"
+        ""
     )
     printf 'wallpaper preview\n\n'
     PV_APC=""; PV_ROWS=(); PV_H=0
@@ -732,6 +743,7 @@ cmd_preview() { # $1 optional wallpaper name/path
             printf '  %s\n' "$line"
         done
     fi
+    printf '  %-12s %s\n' LOCATION "$loc"
     return 0
 }
 
