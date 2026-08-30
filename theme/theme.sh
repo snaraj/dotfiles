@@ -252,17 +252,16 @@ save_wallpaper() {
 # reliable path — a running instance ignores SIGUSR1 on this machine, and its
 # windows (old and new) keep the in-memory palette forever. set-colors
 # --configured also updates the instance's stored config, so windows opened
-# later inherit the new palette too. SIGUSR1 stays as a fallback for instances
-# started before the socket config existed.
+# later inherit the new palette too. NO SIGUSR1 fallback (owner directive
+# 2026-08-30): a full config reload resets runtime state — font-size zoom,
+# resized panes — and a theme change may touch colors ONLY. An instance no
+# socket reaches keeps its old palette; its next window reads the include.
 reload_kitty() {
-    local sock applied=0
+    local sock
     for sock in /tmp/kitty-samuel-*; do
         [ -S "$sock" ] || continue
-        if kitten @ --to "unix:$sock" set-colors --all --configured "$1" 2>/dev/null; then
-            applied=1
-        fi
+        kitten @ --to "unix:$sock" set-colors --all --configured "$1" 2>/dev/null || true
     done
-    [ "$applied" = 1 ] || pkill -USR1 -x kitty 2>/dev/null
     return 0
 }
 
