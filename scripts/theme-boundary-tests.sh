@@ -13,11 +13,12 @@
 #     glob payloads BEFORE curl, one command makes one authenticated API
 #     request with globbing off, the key never enters argv, and a hostile
 #     search query travels as one --data-urlencode literal;
-#   - the credential boundary: the Access Key is only ever sent to
-#     api.unsplash.com — a photo description carrying tab/newline (the
-#     field-shift exploit) and a malicious download_location both leave the
-#     authenticated report on-host or unsent, while a clean photo's report
-#     still fires exactly once.
+#   - the credential boundary, in BOTH its layers, each provable on its own:
+#     a malicious download_location leaves the authenticated report unsent
+#     (the exact-host allowlist), and a photo description carrying tab and
+#     newline — the field-shift exploit — still reports to the photo's OWN
+#     download endpoint exactly once and nowhere else (the NUL transport),
+#     an assertion no key-absence check can satisfy for it.
 # Runs entirely in a throwaway directory; exits 0 on pass.
 set -u
 THEME="$(cd "$(dirname "$0")" && pwd)/theme.sh"
@@ -179,6 +180,19 @@ check  "tab/newline description still saves"   0 run_stub "$tablog" unsplash htt
 if grep '^KEYTO ' "$tablog" | grep -qv '^KEYTO https://api\.unsplash\.com/'; then
     fail "key sent off-host under a crafted description"
 else pass "crafted description cannot retarget the key"; fi
+# That negative is satisfied by the exact-host allowlist ALONE. Roll the
+# transport back to tab-joined + `IFS=$'\t' read` and the crafted description
+# shifts https://evil.invalid/steal into the report field, where the allowlist
+# blanks it: no report fires at all, nothing goes off-host, and a key-absence
+# test stays green while the field shift is fully alive. So assert the
+# transport FUNCTIONALLY — a hostile description must move nothing, leaving
+# exactly the clean run's two authenticated calls (the photo lookup and the
+# legitimate stub123 download report) and no third.
+tabkeys=$(grep -c '^KEYTO ' "$tablog")
+tabreport=$(grep -c '^KEYTO https://api\.unsplash\.com/photos/stub123/download$' "$tablog")
+if [ "$tabreport" = 1 ] && [ "$tabkeys" = 2 ]; then
+    pass "crafted description leaves the report on its own target"
+else fail "crafted description shifted the report ($tabreport legit of $tabkeys authenticated calls)"; fi
 unset STUB_DESC
 
 STUB_DL="https://evil.invalid/dl"
