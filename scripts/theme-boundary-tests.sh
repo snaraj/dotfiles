@@ -12,7 +12,12 @@
 #     exact-HTTPS-host and slug-charset validation refuse lookalike hosts and
 #     glob payloads BEFORE curl, one command makes one authenticated API
 #     request with globbing off, the key never enters argv, and a hostile
-#     search query travels as one --data-urlencode literal.
+#     search query travels as one --data-urlencode literal;
+#   - the credential boundary: the Access Key is only ever sent to
+#     api.unsplash.com — a photo description carrying tab/newline (the
+#     field-shift exploit) and a malicious download_location both leave the
+#     authenticated report on-host or unsent, while a clean photo's report
+#     still fires exactly once.
 # Runs entirely in a throwaway directory; exits 0 on pass.
 set -u
 THEME="$(cd "$(dirname "$0")" && pwd)/theme.sh"
@@ -91,19 +96,34 @@ cat >"$stubdir/curl" <<'EOS'
 #!/bin/bash
 # Deterministic curl stand-in: records every argv to CURL_LOG, answers canned
 # bytes, performs no network I/O. Drains stdin only for `-K -` (config mode),
-# exactly where real curl would read it.
+# and when that config carries the sentinel Access Key it logs `KEYTO <url>`
+# — so a test can prove the key is never sent off api.unsplash.com. The API
+# body's description and download_location come from STUB_DESC / STUB_DL so a
+# case can inject a hostile photo the way a contributor could.
 printf 'ARGV: %s\n' "$*" >>"${CURL_LOG:?}"
 url="" out="" prev="" kdash=0
 for a in "$@"; do
     case "$a" in http://* | https://*) url="$a" ;; esac
     [ "$prev" = "-o" ] && out="$a"
+    [ "$prev" = "--url" ] && url="$a"
     [ "$prev" = "-K" ] && [ "$a" = "-" ] && kdash=1
     prev="$a"
 done
-[ "$kdash" = 1 ] && cat >/dev/null
+cfg=""
+[ "$kdash" = 1 ] && cfg=$(cat)
+case "$cfg" in *stub-sentinel-key*) printf 'KEYTO %s\n' "$url" >>"$CURL_LOG" ;; esac
 case "$url" in
 *api.unsplash.com/photos*)
-    printf '%s' '{"id":"stub123","slug":"stub-photo-stub1234567","alt_description":"stub photo of a boundary test","width":3840,"height":2160,"urls":{"raw":"https://img.invalid/raw","full":"https://img.invalid/full"},"links":{"download_location":"https://img.invalid/dl"},"user":{"name":"Stub"}}'
+    STUB_DESC="${STUB_DESC:-stub photo of a boundary test}" \
+    STUB_DL="${STUB_DL:-https://api.unsplash.com/photos/stub123/download}" \
+        python3 -c 'import json, os, sys
+sys.stdout.write(json.dumps({
+    "id": "stub123", "slug": "stub-photo-stub1234567",
+    "alt_description": os.environ["STUB_DESC"],
+    "width": 3840, "height": 2160,
+    "urls": {"raw": "https://img.invalid/raw", "full": "https://img.invalid/full"},
+    "links": {"download_location": os.environ["STUB_DL"]},
+    "user": {"name": "Stub"}}))'
     ;;
 *img.invalid/*)
     printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5CYII=' |
@@ -120,7 +140,7 @@ run_stub() { CURL_LOG="$1" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentin
 
 goodlog="$fixture/curl-good.log"; : >"$goodlog"
 check  "unsplash photo-page URL accepted"      0 run_stub "$goodlog" unsplash https://unsplash.com/photos/winged-slug-coy_MhYMLHs
-apihits=$(grep -c 'api\.unsplash\.com/photos/winged-slug-coy_MhYMLHs' "$goodlog")
+apihits=$(grep -c '^ARGV: .*api\.unsplash\.com/photos/winged-slug-coy_MhYMLHs' "$goodlog")
 if [ "$apihits" = 1 ]; then pass "exactly one authenticated API request"; else fail "expected 1 API request, saw $apihits"; fi
 if grep -q 'stub-sentinel-key' "$goodlog"; then fail "key leaked into curl argv"; else pass "key never in curl argv"; fi
 # Bind the globoff assertion to the API line itself — the photo-download curl
@@ -141,6 +161,34 @@ check  "hostile search query accepted"         0 run_stub "$searchlog" unsplash 
 if grep -qF -- '--data-urlencode query=cats&count=50[1-3]' "$searchlog"; then
     pass "search text stays one literal encoded value"
 else fail "hostile search not passed through --data-urlencode"; fi
+
+# --- credential boundary (Codex round 5): contributor-controlled text or ----
+# --- download_location can never send the Access Key off api.unsplash.com ---
+dllog="$fixture/curl-dl.log"; : >"$dllog"
+check  "clean photo: fetch + report succeed"   0 run_stub "$dllog" unsplash https://unsplash.com/photos/clean-slug-abcdef12345
+dlhits=$(grep -c '^KEYTO https://api\.unsplash\.com/photos/stub123/download$' "$dllog")
+if [ "$dlhits" = 1 ]; then pass "legit download endpoint reported exactly once"; else fail "expected 1 authenticated download report, saw $dlhits"; fi
+
+# A photo description carrying a tab AND a newline — the exact field-shift
+# exploit: under the old tab-joined transport this landed an attacker URL in
+# the authenticated-report field.
+STUB_DESC=$(printf 'safe name\thttps://evil.invalid/steal\nsecond line')
+export STUB_DESC
+tablog="$fixture/curl-tab.log"; : >"$tablog"
+check  "tab/newline description still saves"   0 run_stub "$tablog" unsplash https://unsplash.com/photos/tabby-slug-abcdef12345
+if grep '^KEYTO ' "$tablog" | grep -qv '^KEYTO https://api\.unsplash\.com/'; then
+    fail "key sent off-host under a crafted description"
+else pass "crafted description cannot retarget the key"; fi
+unset STUB_DESC
+
+STUB_DL="https://evil.invalid/dl"
+export STUB_DL
+evildllog="$fixture/curl-evildl.log"; : >"$evildllog"
+check  "malicious download_location tolerated" 0 run_stub "$evildllog" unsplash https://unsplash.com/photos/evil-dl-abcdef123456
+if grep '^KEYTO ' "$evildllog" | grep -qv '^KEYTO https://api\.unsplash\.com/'; then
+    fail "key followed a non-api download_location"
+else pass "non-api download_location never receives the key"; fi
+unset STUB_DL
 
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; else echo "$fails FAILURES"; fi
 exit "$fails"

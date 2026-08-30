@@ -303,11 +303,20 @@ if not name:
     name = re.sub(r"-[A-Za-z0-9_-]{11}$", "", best.get("slug") or "") or best.get("id") or "photo"
 # raw = the untouched original upload (highest quality); full is a q=85
 # re-compressed jpg. Sharpness first: raw, then full as the fallback.
-print("\t".join(str(x) for x in (
+#
+# Fields are emitted NUL-TERMINATED, not tab-joined: name and the
+# photographer are contributor-controlled free text, and a tab or newline in
+# them under the old \\t transport shifted every later field — including the
+# authenticated download-report URL, which then received the Access Key. NUL
+# cannot occur in these strings (stripped below), so each field stays put.
+name = name.replace("\x00", "")
+who = ((best.get("user") or {}).get("name") or "").replace("\x00", "")
+for field in (
     u.get("raw") or u.get("full", ""), best.get("width", 0), best.get("height", 0),
     name,
     (best.get("links") or {}).get("download_location", ""),
-    (best.get("user") or {}).get("name", ""))))
+    who):
+    sys.stdout.write(str(field) + "\x00")
 '
 
 unsplash_key() {
@@ -353,8 +362,19 @@ cmd_unsplash() {
     [ -n "$query" ] && curl_args+=(-G --data-urlencode "query=$query")
     json=$(printf 'header = "Authorization: Client-ID %s"\n' "$key" |
         curl "${curl_args[@]}" "$url") || die "Unsplash request failed (bad key, rate limit, or no network)"
-    IFS=$'\t' read -r img_url w h slug dl who < <(printf '%s' "$json" | python3 -c "$UNSPLASH_PY") ||
-        die "Unsplash returned no usable photo"
+    # Read the six NUL-terminated fields into an array (a tab/newline in the
+    # contributor-controlled name or photographer can no longer shift a later
+    # field). read -d '' captures each up to its NUL; the final read hits EOF.
+    local _f _fields=()
+    while IFS= read -r -d '' _f; do _fields+=("$_f"); done < <(printf '%s' "$json" | python3 -c "$UNSPLASH_PY")
+    [ "${#_fields[@]}" -ge 6 ] || die "Unsplash returned no usable photo"
+    img_url=${_fields[0]}; w=${_fields[1]}; h=${_fields[2]}
+    slug=${_fields[3]}; dl=${_fields[4]}; who=${_fields[5]}
+    # The download-report call attaches the Access Key, so its target must be
+    # an api.unsplash.com HTTPS URL and nothing else — defence in depth beside
+    # the NUL transport: even a malicious download_location cannot redirect the
+    # key off-host.
+    case "$dl" in https://api.unsplash.com/*) ;; *) dl="" ;; esac
     [ -n "$img_url" ] || die "Unsplash returned no image URL"
     [ -n "$SOURCE_URL" ] || SOURCE_URL="$img_url"
     if [ "$w" -ge 3840 ] 2>/dev/null; then :
@@ -372,9 +392,11 @@ cmd_unsplash() {
     maybe_extend "$SCRATCH"
     save_wallpaper "$SCRATCH" "$mime" "${query:+$query }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     scratch_done
-    # Unsplash API guideline: report the download so the photographer is credited.
+    # Unsplash API guideline: report the download so the photographer is
+    # credited. $dl is validated to api.unsplash.com above; --url draws an
+    # explicit boundary so it can never be read as another curl option.
     [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
-        curl -fsg --max-time 15 -K - -o /dev/null "$dl" 2>/dev/null
+        curl -fsg --max-time 15 -K - -o /dev/null --url "$dl" 2>/dev/null
     [ -n "$who" ] && note "photo by $who on Unsplash"
     use_image "$SAVED"
 }
