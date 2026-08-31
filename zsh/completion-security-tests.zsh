@@ -28,6 +28,9 @@ fail() { print "FAIL  $1"; FAILED=1 }
 check() { [[ $2 == $3 ]] && pass "$1" || { fail "$1"; print "        expected: $3"; print "        actual:   $2" } }
 
 STAMP=.zcompaudit-clean
+TOKEN='zcompaudit-clean v1'
+# Arm a stamp the way the shipped file does: exact token payload, owner-only.
+arm_stamp() { print -r -- $TOKEN >| $1/$STAMP; chmod 600 $1/$STAMP }
 
 # Sandbox with a recording `compinit` stub earlier in fpath than the real one,
 # so the BRANCH the shipped code selects is observable. STUB_RC fakes the return
@@ -72,20 +75,20 @@ check "a clean audit arms the stamp" \
 rm -rf $s
 
 # --- 2. FRESH: a fresh stamp + trusted dump takes the fast path ---------------
-s=$(new_sandbox); : >| $s/zd/$STAMP; chmod 600 $s/zd/$STAMP; : >| $s/zd/.zcompdump
+s=$(new_sandbox); arm_stamp $s/zd; : >| $s/zd/.zcompdump
 run_shipped $s
 check "a fresh clean-audit stamp takes the -C fast path" "$(branch_of $s/record)" "fast"
 rm -rf $s
 
 # --- 3. STALE: a stamp over 24h old re-runs the full audit --------------------
-s=$(new_sandbox); : >| $s/zd/$STAMP; chmod 600 $s/zd/$STAMP
+s=$(new_sandbox); arm_stamp $s/zd
 touch -t 202501010000 $s/zd/$STAMP
 run_shipped $s
 check "a stale stamp re-runs the full compaudit" "$(branch_of $s/record)" "full"
 rm -rf $s
 
 # --- 4. ABORTED audit must not leave a usable fast path ----------------------
-s=$(new_sandbox); : >| $s/zd/$STAMP; chmod 600 $s/zd/$STAMP
+s=$(new_sandbox); arm_stamp $s/zd
 touch -t 202501010000 $s/zd/$STAMP
 run_shipped $s 1
 check "an ABORTED audit removes the stamp" \
@@ -98,7 +101,7 @@ rm -rf $s
 # --- 5. FILTERED audit ("ignore insecure dirs" -> y) must not arm anything ----
 # compinit returns 0 here and writes a dump, which is exactly what made arming
 # on exit status alone unsafe.
-s=$(new_sandbox); : >| $s/zd/$STAMP; chmod 600 $s/zd/$STAMP
+s=$(new_sandbox); arm_stamp $s/zd
 touch -t 202501010000 $s/zd/$STAMP
 run_shipped $s 0 yes
 check "a FILTERED audit (rc=0 + _comp_secure) does not arm the stamp" \
@@ -111,20 +114,21 @@ check "the shell after a filtered audit still runs the full audit" \
 rm -rf $s
 
 # --- 6. FUTURE-DATED stamp must fail closed ----------------------------------
-s=$(new_sandbox); : >| $s/zd/$STAMP; chmod 600 $s/zd/$STAMP
+s=$(new_sandbox); arm_stamp $s/zd
 touch -t 203501010000 $s/zd/$STAMP; : >| $s/zd/.zcompdump
 run_shipped $s
 check "a FUTURE-dated stamp is not accepted as fresh" "$(branch_of $s/record)" "full"
 rm -rf $s
 
 # --- 7. A stamp that is not ours/not a regular file is not trusted -----------
-s=$(new_sandbox); : >| $s/zd/real-stamp; ln -s $s/zd/real-stamp $s/zd/$STAMP
+s=$(new_sandbox); print -r -- $TOKEN >| $s/zd/real-stamp; chmod 600 $s/zd/real-stamp
+ln -s $s/zd/real-stamp $s/zd/$STAMP
 : >| $s/zd/.zcompdump
 run_shipped $s
 check "a SYMLINKED stamp is not trusted" "$(branch_of $s/record)" "full"
 rm -rf $s
 
-s=$(new_sandbox); : >| $s/zd/$STAMP; chmod 666 $s/zd/$STAMP; : >| $s/zd/.zcompdump
+s=$(new_sandbox); arm_stamp $s/zd; chmod 666 $s/zd/$STAMP; : >| $s/zd/.zcompdump
 run_shipped $s
 check "a world-writable stamp is not trusted" "$(branch_of $s/record)" "full"
 rm -rf $s
@@ -207,7 +211,96 @@ else
     print "SKIP  real-compinit pty regression (python3 unavailable)"
 fi
 
-# --- 12. DIFFERENTIAL: the old glob idiom must not come back -----------------
+
+# --- 12. The audit machinery must never resolve out of the candidate directory
+# A writable completion dir on fpath can supply `compinit` itself, or just
+# `compaudit`, which the real compinit autoloads before it has audited anything.
+for _victimfn in compinit compaudit; do
+    s=$(mktemp -d); mkdir -p $s/zd/completions
+    chmod 0777 $s/zd/completions
+    print -r -- "print ATTACKER-$_victimfn-RAN" > $s/zd/completions/$_victimfn
+    [[ $_victimfn == compaudit ]] && print -r -- "return 0" >> $s/zd/completions/$_victimfn
+    out=$( ZDOTDIR=$s/zd zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null 2>&1 )
+    check "an attacker-supplied $_victimfn in the completion dir is never executed" \
+          "$([[ $out == *ATTACKER-$_victimfn-RAN* ]] && print RAN || print blocked)" "blocked"
+    check "and that startup arms no stamp (attacker $_victimfn)" \
+          "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "absent"
+    rm -rf $s
+done
+unset _victimfn
+
+# --- 12b. Even a TRUSTED completion dir must not supply the audit machinery ---
+# The dir is on fpath by design, so without the +X force-load an ordinary file
+# named compinit/compaudit there would be autoloaded in place of the real one.
+for _victimfn in compinit compaudit; do
+    s=$(mktemp -d); mkdir -p $s/zd/completions      # left at safe 0700/0755
+    print -r -- "print ATTACKER-$_victimfn-RAN" > $s/zd/completions/$_victimfn
+    [[ $_victimfn == compaudit ]] && print -r -- "return 0" >> $s/zd/completions/$_victimfn
+    out=$( ZDOTDIR=$s/zd zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null 2>&1 )
+    check "a $_victimfn file in a TRUSTED completion dir is still never executed" \
+          "$([[ $out == *ATTACKER-$_victimfn-RAN* ]] && print RAN || print blocked)" "blocked"
+    rm -rf $s
+done
+unset _victimfn
+
+# --- 13. An untrusted completion directory is kept OFF fpath entirely ---------
+s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 0777 $s/zd/completions
+out=$( ZDOTDIR=$s/zd zsh -f -c "ZDOTDIR=$s/zd; source $SRC; print FPATH0=\$fpath[1]" </dev/null 2>/dev/null )
+check "a world-writable completion dir is not placed on fpath" \
+      "$([[ $out == *"FPATH0=$s/zd/completions"* ]] && print ON-FPATH || print excluded)" "excluded"
+rm -rf $s
+
+# --- 14. A fresh stamp must not survive the directory turning writable --------
+s=$(new_sandbox); arm_stamp $s/zd; : >| $s/zd/.zcompdump
+chmod 0777 $s/zd/completions
+run_shipped $s
+check "a fresh stamp does NOT arm the fast path once the dir is world-writable" \
+      "$(branch_of $s/record)" "full"
+rm -rf $s
+
+# --- 15. A stamp this file did not write is rejected (upgrade provenance) -----
+# The superseded pre-audit redirect could aim at the stamp NAME and create it
+# owned by us with mode 0644 — correct metadata, wrong provenance.
+s=$(new_sandbox); print -r -- "#compdef kubectl" >| $s/zd/$STAMP; chmod 644 $s/zd/$STAMP
+: >| $s/zd/.zcompdump
+run_shipped $s
+check "a stamp forged by the old pre-audit redirect is rejected" \
+      "$(branch_of $s/record)" "full"
+rm -rf $s
+
+s=$(new_sandbox); arm_stamp $s/zd; chmod 644 $s/zd/$STAMP; : >| $s/zd/.zcompdump
+run_shipped $s
+check "a correct-token stamp that is not owner-only is rejected" \
+      "$(branch_of $s/record)" "full"
+rm -rf $s
+
+s=$(new_sandbox); print -r -- "zcompaudit-clean v0" >| $s/zd/$STAMP; chmod 600 $s/zd/$STAMP
+: >| $s/zd/.zcompdump
+run_shipped $s
+check "a stamp carrying a different token version is rejected" \
+      "$(branch_of $s/record)" "full"
+rm -rf $s
+
+# --- 16. The exact superseded-revision -> current upgrade transition ---------
+# The superseded revision wrote generated completions into the directory BEFORE
+# auditing it, with a plain redirect. Reproduced faithfully here: a writer in a
+# world-writable completion dir aims that redirect at the stamp NAME, so the
+# stamp is created by the *previous* shell, as the real user, with a normal
+# mode. The current file must not treat that as its own clean-audit receipt.
+s=$(new_sandbox); chmod 0777 $s/zd/completions
+ln -s $s/zd/$STAMP $s/zd/completions/_kubectl
+print -r -- "#compdef kubectl" > $s/zd/completions/_kubectl   # the superseded pre-audit redirect
+check "the superseded pre-audit redirect does create the stamp name" \
+      "$([[ -e $s/zd/$STAMP && ! -h $s/zd/$STAMP ]] && print created || print absent)" "created"
+check "and it is owned by us with ordinary metadata (so metadata alone is not proof)" \
+      "$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/zd/$STAMP; print \$(( st[uid] == UID ))")" "1"
+rm -f $s/zd/completions/_kubectl $s/record
+run_shipped $s
+check "the current file does NOT honour that inherited stamp" \
+      "$(branch_of $s/record)" "full"
+rm -rf $s
+
+# --- 17. DIFFERENTIAL: the old glob idiom must not come back -----------------
 old_always_true=$(zsh -f -c '
     d=$(mktemp -d); rm -f $d/.zcompdump
     if [[ -n $d/.zcompdump(#qN.mh-24) ]]; then print yes; else print no; fi' 2>/dev/null)
