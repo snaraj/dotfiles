@@ -26,7 +26,8 @@ theme                    # usage
 theme help               # same
 theme random             # random wallpaper from the wallpaper folder -> desktop + pywal colors
 theme set <image>        # specific local image -> desktop + pywal colors
-theme unsplash           # random high-res Unsplash photo -> save + apply
+theme unsplash           # this command's help (no surprise download)
+theme unsplash random    # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
 theme unsplash auth      # one-time account link: Unsplash+ w/o watermark
@@ -62,7 +63,7 @@ theme set ~/Pictures/screenshot-4k.png       # any path outside the library
 theme random
 
 # Pull something new from Unsplash (needs a free key, see below)
-theme unsplash
+theme unsplash random
 theme unsplash "misty forest"
 theme unsplash "brutalist architecture"
 
@@ -152,8 +153,10 @@ security add-generic-password -s unsplash-access-key -a "$USER" -w
 #   ^ prompts for the key without echoing it; -w with no value reads it interactively
 ```
 
-With no key anywhere, `theme unsplash` fails with a one-line instruction and
-does nothing else. It never silently falls back to another photo service.
+With no key anywhere, any Unsplash *fetch* (`theme unsplash random`, a query,
+a photo link) fails with a one-line instruction and does nothing else. It
+never silently falls back to another photo service. Bare `theme unsplash`
+needs no key at all — it prints this command's help.
 
 #### Unsplash+ without the watermark (`theme unsplash auth`)
 

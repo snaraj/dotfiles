@@ -548,8 +548,14 @@ cmd_unsplash_auth() {
     note "opening the authorize page — sign in as your Unsplash+ account and approve"
     if command -v open >/dev/null 2>&1; then open "$authurl"; else note "open: $authurl"; fi
     printf 'paste the code shown after approving: '
-    IFS= read -r code
-    case "$code" in '' | *[!A-Za-z0-9_-]*) die "that does not look like an authorization code (letters, digits, - and _ only)" ;; esac
+    # -e gives readline editing on a tty (arrow keys edit instead of
+    # injecting ESC[D into the buffer); harmlessly ignored on a pipe.
+    IFS= read -r -e code
+    # Browser copies arrive padded — leading/trailing spaces, tabs, or a
+    # stray CR are transport noise, not part of the code: strip them BEFORE
+    # the charset gate so a padded paste of a valid code is not refused.
+    code=$(printf '%s' "$code" | tr -d ' \t\r\n')
+    case "$code" in '' | *[!A-Za-z0-9_-]*) die "that does not look like an authorization code (letters, digits, - and _ only) — copy just the code text, without surrounding characters" ;; esac
     json=$(printf 'data = "client_id=%s"\ndata = "client_secret=%s"\ndata = "redirect_uri=urn:ietf:wg:oauth:2.0:oob"\ndata = "code=%s"\ndata = "grant_type=authorization_code"\n' "$key" "$secret" "$code" |
         curl -fsg --max-time 30 -K - "https://unsplash.com/oauth/token") ||
         die "token exchange failed — wrong/expired code, or the app's redirect URIs do not include urn:ietf:wg:oauth:2.0:oob (add it on the dashboard)"
@@ -1229,9 +1235,9 @@ usage() {
     cat <<EOF
 
 Apply Commands:
-  set             apply a specific local wallpaper (path, or name in the wallpaper folder)
+  set             apply a wallpaper: local name/path, or any actionable link
   random          random wallpaper from the configured wallpaper folder
-  unsplash        fetch a random high-res Unsplash photo, save it, apply it
+  unsplash        Unsplash photos: search, page-url, random; auth and status
   url             download a direct image URL or Pinterest pin, save it, apply it
 
 Library Commands:
@@ -1242,8 +1248,7 @@ Library Commands:
 
 Info Commands:
   status          current theme, color-scheme swatches, variables
-  unsplash status Unsplash API usage: requests left this hour, key, tier
-  help            this text
+  help            this text (per-command: theme <command> --help)
 
 Usage:
   theme <command> [flags]
@@ -1268,6 +1273,15 @@ EOF
 #
 # $wdir is display-only and is never opened, listed or written: the
 # operational WALLPAPER_DIR is untouched, exactly as everywhere else.
+# Per-command help. Every body below is an UNQUOTED heredoc, because $wdir has
+# to expand — which means backticks and $(…) inside them are LIVE COMMAND
+# SUBSTITUTION, executed just by rendering the help. Quote example commands
+# with 'single quotes', never backticks: a backticked `theme unsplash random`
+# here would fetch and apply a wallpaper on every --help, and any example that
+# renders help again would recurse. Escape a backtick (\`) if one is truly
+# needed. Keep help text generic and extensible, and never let it grow —
+# additions pay for themselves by consolidating something else (owner
+# directive 2026-08-30).
 usage_cmd() {
     local wdir
     wdir=$(display_text "$WALLPAPER_DIR")
@@ -1298,34 +1312,31 @@ theme set <image | url> [--rotate left|right] [--extend[=RRGGBB]]
 EOF
         ;;
     unsplash) cat <<EOF
-theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
+theme unsplash <query… | photo-url | subcommand> [--rotate left|right] [--extend[=RRGGBB]]
 
-  Fetch an Unsplash photo, save it into $wdir — named from your
-  query plus the photo's own description — then apply it (desktop +
-  palette + kitty). Always downloads the RAW original rendition (the
-  highest quality Unsplash serves), preferring 3840px+ photos on search.
+  Fetch an Unsplash photo into $wdir — named from your query plus
+  the photo's own description — then apply it (desktop + palette +
+  kitty). Downloads the RAW original rendition, preferring 3840px+ on
+  search. A query needs no quotes; a photo page link
+  (unsplash.com/photos/…) fetches exactly that photo. Bare
+  'theme unsplash' shows this help.
 
-  A query needs no quotes; no query = fully random. Pasting a photo page
-  link (unsplash.com/photos/…) fetches exactly that photo instead of
-  searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
-  Keychain item (see README.md).
+  Subcommands:
+    random    fully random photo (landscape, high resolution)
+    auth      one-time account link (OAuth): Unsplash+ photos then
+              download watermark-free, like the site's Download button —
+              without it they arrive WATERMARKED. Needs the app secret
+              once (env UNSPLASH_SECRET_KEY / Keychain 'unsplash-secret-key')
+    status    API window: requests left, tier, key source, linked
+              account (costs 1 request)
 
-  theme unsplash auth links your Unsplash ACCOUNT once (OAuth): after
-  that, Unsplash+ photos download watermark-free, exactly like the
-  website's Download button. Without it they arrive WATERMARKED (the
-  application key has no subscription). Needs the app's secret key once
-  (env UNSPLASH_SECRET_KEY or Keychain 'unsplash-secret-key').
-
-  theme unsplash status shows the API window for your key — requests
-  left this hour, tier, key source, linked account. Costs 1 request.
+  Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key' Keychain item.
 
   Examples:
-    theme unsplash                     # surprise me
+    theme unsplash random
     theme unsplash neon city rain
-    theme unsplash mountain lake sunrise --rotate right
     theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
-    theme unsplash auth                # one-time: watermark-free Unsplash+
-    theme unsplash status              # 39/50 requests remaining this hour
+    theme unsplash auth
 EOF
         ;;
     url) cat <<EOF
@@ -1351,13 +1362,11 @@ theme list [-v]
 
   Wallpapers as a table sorted by LATEST ADDED. Columns: title
   (truncated to the terminal) and a small render of the colorscheme
-  that wallpaper derived when it was last applied (from the palette
-  cache — a wallpaper never applied shows "-", nothing is computed at
-  list time, so the listing stays instant). -v adds a small picture
-  preview (kitty graphics; in kitty only) plus source — the site it
-  came from (unsplash, pinterest, reddit, …), recorded at download
-  time or read from macOS download metadata, "-" when unknown —
-  format, size, and date added.
+  that wallpaper derives (cached; anything missing is derived once on
+  the first listing, instant after). -v adds a small picture preview
+  (kitty graphics; in kitty only) plus source — the site it came from,
+  recorded at download time or read from macOS download metadata, "-"
+  when unknown — format, size, and date added.
 
   A truncated title copied from the table (with or without the …)
   works in set/rename/rm when only one wallpaper starts with it.
@@ -1502,8 +1511,12 @@ set)
     ;;
 unsplash)
     shift
-    if [ "${1:-}" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status
-    elif [ "${1:-}" = auth ] && [ $# -eq 1 ]; then cmd_unsplash_auth
+    # kubectl-style root: bare `theme unsplash` is the command's help, not a
+    # surprise download — the random fetch is the explicit `random` subcommand.
+    if [ $# -eq 0 ]; then usage_cmd unsplash
+    elif [ "$1" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status
+    elif [ "$1" = auth ] && [ $# -eq 1 ]; then cmd_unsplash_auth
+    elif [ "$1" = random ] && [ $# -eq 1 ]; then cmd_unsplash ""
     else cmd_unsplash "$*"; fi
     ;;
 url) cmd_url "${2:-}" ;;
