@@ -172,17 +172,31 @@ _zc_trusted $ZDOTDIR && _zc_no_acl $ZDOTDIR && _zc_home_ok=1
 
 # Publish the stamp by ATOMIC RENAME from a fresh owner-only file, never by
 # redirecting through the destination name: `>|` follows a symlink planted
-# there, while rename replaces the entry itself and cannot be redirected. Every
-# step is checked and the result revalidated; any failure arms nothing.
+# there, while rename replaces the entry itself and cannot be redirected.
+#
+# The temporary must be owner-only AT THE OPEN, not chmod'd afterwards. Under a
+# permissive ambient umask the create-then-chmod form published a 0666 file for
+# a window (measured: mode 666 at creation under `umask 000`), and a concurrent
+# process that opened it in that window keeps a WRITABLE DESCRIPTOR that neither
+# the chmod, the rename, nor the revalidation can revoke — enough to keep
+# rewriting a valid token and hold a once-clean receipt fresh forever, so the
+# daily compaudit never runs again. umask 077 is therefore scoped around the
+# whole publish, and restored on every exit path.
 _zc_publish_stamp() {
     (( _zc_home_ok )) || return 1
     local tmp=$ZDOTDIR/.zcompaudit-clean.tmp.$$
+    local saved=$(umask)
+    local rc=1
+    umask 077
     rm -f -- $tmp 2>/dev/null
-    [[ -e $tmp || -h $tmp ]] && return 1
-    print -r -- $_zc_token >| $tmp 2>/dev/null || { rm -f -- $tmp 2>/dev/null; return 1 }
-    chmod 600 $tmp 2>/dev/null || { rm -f -- $tmp 2>/dev/null; return 1 }
-    mv -f -- $tmp $_zc_stamp 2>/dev/null || { rm -f -- $tmp 2>/dev/null; return 1 }
-    _zc_stamp_ok
+    if [[ ! -e $tmp && ! -h $tmp ]] &&
+       print -r -- $_zc_token >| $tmp 2>/dev/null &&
+       mv -f -- $tmp $_zc_stamp 2>/dev/null; then
+        _zc_stamp_ok && rc=0
+    fi
+    (( rc == 0 )) || rm -f -- $tmp 2>/dev/null
+    umask $saved
+    return $rc
 }
 
 [[ -e $_zc_dir ]] || mkdir -p -m 700 $_zc_dir

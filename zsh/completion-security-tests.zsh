@@ -620,6 +620,48 @@ check "and the real stamp is a regular owner-only file afterwards" \
 unset _before _after
 rm -rf $s
 
+# (ii-j) the publication temporary must be owner-only AT CREATION.
+# create-then-chmod published a 0666 file for a window under a permissive
+# ambient umask; a process that opened it there keeps a WRITABLE DESCRIPTOR
+# that no later chmod, rename, or revalidation can revoke — enough to keep
+# refreshing a valid receipt so the daily compaudit never runs again.
+s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 755 $s/zd $s/zd/completions
+cat > $s/poll.zsh <<POLLEOF
+zmodload -F zsh/stat b:zstat
+typeset -A st
+for i in {1..400000}; do
+  for f in $s/zd/.zcompaudit-clean.tmp.*(N); do
+    zstat -H st -L -- \$f 2>/dev/null && { printf '%o\n' \$(( st[mode] & 8#777 )) > $s/observed; exit 0 }
+  done
+done
+POLLEOF
+zsh -f $s/poll.zsh &
+_poll=$!
+sleep 0.05
+zsh -f -c "umask 000; ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
+wait $_poll 2>/dev/null
+_seen=$(cat $s/observed 2>/dev/null)
+check "the publication temporary is never group/world-accessible at creation" \
+      "${_seen:-600}" "600"
+check "and the published stamp is owner-only" \
+      "$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/zd/$STAMP 2>/dev/null && print \$(( (st[mode] & 8#77) == 0 )) || print no")" "1"
+unset _poll _seen
+rm -rf $s
+
+# (ii-k) publishing must not leak the caller's umask back out.
+s=$(mktemp -d); mkdir -p $s/zd/completions
+_um=$( zsh -f -c "umask 022; ZDOTDIR=$s/zd; source $SRC >/dev/null 2>&1; umask" </dev/null 2>&1 )
+check "the caller's umask is restored after publication" "$_um" "022"
+unset _um
+rm -rf $s
+
+# (ii-l) an EXPIRED receipt must force the full audit again.
+s=$(new_sandbox); arm_stamp $s/zd; : >| $s/zd/.zcompdump
+touch -t 202001010000 $s/zd/$STAMP
+run_shipped $s
+check "an expired receipt forces a full audit" "$(branch_of $s/record)" "full"
+rm -rf $s
+
 # (iii) an fpath entry spelled differently but resolving to the same directory.
 # A raw string filter let `<cache>/` through and the auditor was pinned from it.
 for _alias in '/' '/.' ''; do
