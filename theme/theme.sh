@@ -362,19 +362,21 @@ derive_scheme() { # $1 file
         wal -n -i "$1" -s -t -e --contrast 3.0 >/dev/null 2>&1
 }
 
-# Every library wallpaper gets a scheme, not just the ones already applied:
+# Wallpapers named on STDIN get a scheme, not just the ones already applied:
 # derive whatever is missing, then re-derive the CURRENT wallpaper so wal's
 # per-run export files (colors-kitty.conf and friends — what a fresh kitty
 # window reads through $CURRENT) describe the applied theme again, not the
 # last backfilled image. Re-deriving a cached wallpaper is a cache read, not
-# an image reprocess, so the restore is cheap. Skipped under THEME_NO_APPLY
-# (it mutates the wal cache).
-backfill_schemes() {
-    dry && return 0
+# an image reprocess, so the restore is cheap. The caller bounds the work by
+# bounding the list — a ten-thousand-image library must never derive beyond
+# what is being shown. Skipped under THEME_NO_APPLY (it mutates the cache).
+backfill_schemes() { # stdin: newline-delimited image paths
+    dry && { cat >/dev/null; return 0; }
     local f cur n=0 miss=()
     while IFS= read -r f; do
+        [ -f "$f" ] || continue
         wall_scheme "$f" >/dev/null 2>&1 || miss+=("$f")
-    done < <(find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null)
+    done
     [ "${#miss[@]}" -eq 0 ] && return 0
     note "deriving ${#miss[@]} missing colorscheme(s)…"
     for f in "${miss[@]}"; do derive_scheme "$f" && n=$((n + 1)); done
@@ -921,8 +923,16 @@ wall_preview() { # $1 file
 # preview all live behind -v, so the default listing does no per-file
 # metadata work beyond that.
 cmd_list() {
-    local cols namew f name src fmt bytes added c r g b n
-    backfill_schemes
+    local cols namew f name src fmt bytes added c r g b n total shown listfile
+    listfile=$(mktemp) || die "cannot create a scratch list"
+    find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null |
+        while IFS= read -r f; do
+            printf '%s\t%s\n' "$(stat -f %B "$f" 2>/dev/null || printf 0)" "$f"
+        done | sort -rn | cut -f2- >"$listfile"
+    total=$(wc -l <"$listfile" | tr -d ' ')
+    shown=$total
+    [ "$LIST_N" -gt 0 ] && [ "$total" -gt "$LIST_N" ] && shown=$LIST_N
+    head -n "$shown" "$listfile" | backfill_schemes
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
     local pvok="" pvw=0
     [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && { pvok=1; pvw=9; }
@@ -935,10 +945,7 @@ cmd_list() {
     else
         printf '  %-*s  %s\n' "$namew" TITLE COLORSCHEME
     fi
-    find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null |
-        while IFS= read -r f; do
-            printf '%s\t%s\n' "$(stat -f %B "$f" 2>/dev/null || printf 0)" "$f"
-        done | sort -rn | cut -f2- |
+    head -n "$shown" "$listfile" |
         while IFS= read -r f; do
             name=$(basename "$f")
             name="${name%.*}"
@@ -981,6 +988,10 @@ cmd_list() {
             # Second line of the picture preview, when one rendered.
             if [ -n "$PV2" ]; then printf '  %s\n' "$PV2"; fi
         done
+    rm -f "$listfile"
+    [ "$shown" -lt "$total" ] &&
+        printf '\n  newest %s of %s — more: theme list -n <count>, or --all\n' "$shown" "$total"
+    return 0
 }
 
 # One wallpaper up close, styled like the list: a larger picture on the
@@ -996,7 +1007,7 @@ cmd_preview() { # $1 optional wallpaper name/path
         img=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
         [ -n "$img" ] && [ -f "$img" ] || die "no current wallpaper to preview — name one: theme preview <wallpaper>"
     fi
-    backfill_schemes
+    printf '%s\n' "$img" | backfill_schemes
     # Display copies only. $img stays byte-exact — it is what render_preview,
     # img_size, stat and wall_scheme open.
     name=$(basename "$img"); name="${name%.*}"
@@ -1379,15 +1390,15 @@ theme url <link> [--rotate left|right]
 EOF
         ;;
     list) cat <<EOF
-theme list [-v]
+theme list [-v] [-n <count> | --all]
 
-  Wallpapers as a table sorted by LATEST ADDED. Columns: title
-  (truncated to the terminal) and a small render of the colorscheme
-  that wallpaper derives (cached; anything missing is derived once on
-  the first listing, instant after). -v adds a small picture preview
-  (kitty graphics; in kitty only) plus source — the site it came from,
-  recorded at download time or read from macOS download metadata, "-"
-  when unknown — format, size, and date added.
+  Wallpapers as a table sorted by LATEST ADDED — the newest 10 by
+  default; -n <count> or --all widens it (colorschemes render from
+  cache; anything missing is derived once, only for the rows shown).
+  -v adds a small picture preview (kitty graphics; in kitty only) plus
+  source — the site it came from, recorded at download time or read
+  from macOS download metadata, "-" when unknown — format, size, and
+  date added.
 
   A truncated title copied from the table (with or without the …)
   works in set/rename/rm when only one wallpaper starts with it.
@@ -1475,22 +1486,30 @@ ROTATE=""
 EXTEND=""
 VERBOSE=""
 SOURCE_URL=""
+LIST_N=10
 _args=()
 _want=""
+_want_n=""
 for _a in "$@"; do
     if [ -n "$_want" ]; then ROTATE="$_a"; _want=""; continue; fi
+    if [ -n "$_want_n" ]; then LIST_N="$_a"; _want_n=""; continue; fi
     case "$_a" in
     --rotate) _want=1 ;;
     --rotate=*) ROTATE="${_a#*=}" ;;
     --extend) EXTEND="000000" ;;
     --extend=*) EXTEND="${_a#*=}"; EXTEND="${EXTEND#\#}" ;;
     -v | --verbose) VERBOSE=1 ;;
+    -n) _want_n=1 ;;
+    -n=* | --limit=*) LIST_N="${_a#*=}" ;;
+    --all) LIST_N=0 ;;
     *) _args+=("$_a") ;;
     esac
 done
 [ -z "$_want" ] || die "--rotate takes left or right"
+[ -z "$_want_n" ] || die "-n takes a row count"
 set -- "${_args[@]}"
 case "$ROTATE" in '' | left | right) ;; *) die "--rotate takes left or right" ;; esac
+case "$LIST_N" in '' | *[!0-9]*) die "-n takes a row count (0 or --all = everything)" ;; esac
 case "$EXTEND" in
 '' ) ;;
 [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;

@@ -365,8 +365,12 @@ printf '{\n    "wallpaper": "%s",\n    "colors": {"color0": "#0102", "color1": "
 
 listout="$fixture/list.out"; listerr="$fixture/list.err"
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+# --all, because these assertions are about scheme ATTRIBUTION, not paging:
+# this library holds more wallpapers than `list` shows by default, so without
+# it the rows under test fall off the end and the checks silently stop
+# checking (which is worse than failing — they would pass on an empty grep).
 run_list() { WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
-    bash "$THEME" list >"$listout" 2>"$listerr"; }
+    bash "$THEME" list --all >"$listout" 2>"$listerr"; }
 row() { grep "^  $1  *" "$listout"; }   # one listing row, by its exact title
 owns() { # $1 description, $2 title, $3 own rgb, $4 rgb it must never show
     local r
