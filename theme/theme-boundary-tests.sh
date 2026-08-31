@@ -204,8 +204,14 @@ for a in "$@"; do
 done
 cfg=""
 [ "$kdash" = 1 ] && cfg=$(cat)
-case "$cfg" in *stub-sentinel-key*) printf 'KEYTO %s\n' "$url" >>"$CURL_LOG" ;; esac
+case "$cfg" in
+*stub-sentinel-key*) printf 'KEYTO %s\n' "$url" >>"$CURL_LOG" ;;
+*stub-user-token*) printf 'TOKTO %s\n' "$url" >>"$CURL_LOG" ;;
+esac
 case "$url" in
+*api.unsplash.com/photos/stub123/download*)
+    printf '{"url": "%s"}' "${STUB_ENTITLED:-https://delivery.unsplash.com/entitled-bytes}"
+    ;;
 *api.unsplash.com/photos*)
     STUB_DESC="${STUB_DESC:-stub photo of a boundary test}" \
     STUB_DL="${STUB_DL:-https://api.unsplash.com/photos/stub123/download}" \
@@ -215,11 +221,12 @@ sys.stdout.write(json.dumps({
     "id": "stub123", "slug": "stub-photo-stub1234567",
     "alt_description": os.environ["STUB_DESC"],
     "width": 3840, "height": 2160,
-    "urls": {"raw": "https://img.invalid/raw", "full": "https://img.invalid/full"},
+    "urls": {"raw": os.environ.get("STUB_RAW", "https://img.invalid/raw"),
+             "full": "https://img.invalid/full"},
     "links": {"download_location": os.environ["STUB_DL"]},
     "user": {"name": os.environ["STUB_WHO"]}}))'
     ;;
-*img.invalid/*)
+*img.invalid/* | *plus.unsplash.com/* | *delivery.unsplash.com/*)
     printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5CYII=' |
         base64 -d >"${out:?}"
     ;;
@@ -301,6 +308,35 @@ if [ "$tabreport" = 1 ] && [ "$tabkeys" = 2 ]; then
     pass "crafted description leaves the report on its own target"
 else fail "crafted description shifted the report ($tabreport legit of $tabkeys authenticated calls)"; fi
 unset STUB_DESC
+
+# --- Unsplash+ entitlement: with an account token the binary comes from the
+# --- download endpoint's ANSWER (the clean file), that call IS the report
+# --- (never two), and a hostile answer cannot choose the download host ------
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_stub_tok() { STUB_TOKEN=stub-user-token run_stub "$@"; }
+STUB_RAW="https://plus.unsplash.com/premium-raw-stub"
+STUB_DESC="premium boundary test"
+export STUB_RAW STUB_DESC
+premlog="$fixture/curl-prem.log"; : >"$premlog"
+check  "premium + account token saves"         0 run_stub_tok "$premlog" unsplash https://unsplash.com/photos/premium-slug-abcdef12345
+exists "premium photo saved"                   yes "$lib/unsplash/premium-boundary-test.png"
+if grep -q '^ARGV: .*delivery\.unsplash\.com/entitled-bytes' "$premlog" &&
+    ! grep -q '^ARGV: .*plus\.unsplash\.com' "$premlog"; then
+    pass "binary fetched from the entitled answer, not the watermarked raw"
+else fail "entitled download did not replace the raw rendition"; fi
+tokdl=$(grep -c '^TOKTO https://api\.unsplash\.com/photos/stub123/download$' "$premlog")
+if [ "$tokdl" = 1 ]; then pass "entitled call doubles as the report — exactly one"
+else fail "expected 1 authenticated download call, saw $tokdl"; fi
+STUB_ENTITLED="https://evil.invalid/steal-the-fetch"
+export STUB_ENTITLED
+premevil="$fixture/curl-premevil.log"; : >"$premevil"
+check  "hostile entitled answer tolerated"     0 run_stub_tok "$premevil" unsplash https://unsplash.com/photos/premium-slug-abcdef12345
+if grep '^ARGV: ' "$premevil" | grep -q 'evil\.invalid'; then
+    fail "a hostile entitled URL was fetched"
+elif grep -q '^ARGV: .*plus\.unsplash\.com' "$premevil"; then
+    pass "hostile entitled URL refused; fell back to the standard rendition"
+else fail "hostile entitled URL: no fallback fetch happened"; fi
+unset STUB_ENTITLED STUB_RAW STUB_DESC
 
 STUB_DL="https://evil.invalid/dl"
 export STUB_DL

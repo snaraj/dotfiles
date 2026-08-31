@@ -777,6 +777,26 @@ cmd_unsplash() {
     # the NUL transport: even a malicious download_location cannot redirect the
     # key off-host.
     case "$dl" in https://api.unsplash.com/*) ;; *) dl="" ;; esac
+    # Unsplash+ entitlement lives in the DOWNLOAD endpoint, not the photo
+    # JSON: urls.raw serves the watermarked rendition no matter who asked,
+    # while download_location called WITH the account bearer answers a
+    # signed, expiring delivery URL — the same clean file as the site's
+    # Download button. That call is also the API's download report, so the
+    # post-save courtesy ping is skipped when the download went through it.
+    local reported="" entitled _eh
+    if [ "${_fields[6]:-0}" = 1 ] && [ -n "$(unsplash_user_token)" ] && [ -n "$dl" ]; then
+        entitled=$(unsplash_auth_line |
+            curl -fsg --max-time 30 -K - --url "$dl" |
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))' 2>/dev/null)
+        # The answer chooses the host, so it is bound before use: https and
+        # an unsplash.com subdomain, through the same parser as every other
+        # host decision here — never a substring match on the raw string.
+        _eh=$(url_host "$entitled" 2>/dev/null) || _eh=""
+        case "$entitled:$_eh" in
+        https://*:*.unsplash.com) img_url="$entitled"; reported=1 ;;
+        *) note "entitled download unavailable — falling back to the standard (watermarked) rendition" ;;
+        esac
+    fi
     [ -n "$img_url" ] || die "Unsplash returned no image URL"
     [ -n "$SOURCE_URL" ] || SOURCE_URL="$img_url"
     if [ "$w" -ge 3840 ] 2>/dev/null; then :
@@ -798,7 +818,7 @@ cmd_unsplash() {
     # Unsplash API guideline: report the download so the photographer is
     # credited. $dl is validated to api.unsplash.com above; --url draws an
     # explicit boundary so it can never be read as another curl option.
-    [ -n "$dl" ] && unsplash_auth_line |
+    [ -n "$dl" ] && [ -z "$reported" ] && unsplash_auth_line |
         curl -fsg --max-time 15 -K - -o /dev/null --url "$dl" 2>/dev/null
     [ -n "$who" ] && note "photo by $who on Unsplash"
     use_image "$SAVED"
