@@ -243,15 +243,45 @@ fetch_img() {
 #
 # Prints "SAVED <path>", "REUSED <path>", or "ERR <message>".
 SAVE_PY='
-import errno, os, sys
+import errno, os, stat, sys
 src, lib, sub, base, ext = sys.argv[1:6]
 def out(tag, val):
     sys.stdout.write(tag + " " + val + "\n"); raise SystemExit(0)
+# The CURRENT name of the descriptor, asked of the kernel rather than
+# assembled from caller strings. Used only to REPORT where the checked object
+# lives, never to make a decision, so a rename during the save yields the
+# checked directory under its new name instead of a name that now points
+# somewhere else entirely.
+def fdpath(fd, fallback):
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+            return fcntl.fcntl(fd, 50, b"\0" * 1024).rstrip(b"\0").decode()
+        return os.readlink("/proc/self/fd/%d" % fd)
+    except Exception:
+        return fallback
+# A pathname handed back to the shell is re-resolved by everything that
+# touches it afterwards: the xattr, the size probe, pywal, the desktop
+# setter. None of those can hold a descriptor, so the directories are
+# required to be ones no OTHER principal can rename entries in. Asked of the
+# open descriptor through fstat, this cannot be raced: it describes the
+# object being held, not a name someone may have swapped.
+def trusted(fd, what):
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        out("ERR", what + " is not a directory")
+    if st.st_uid != os.getuid():
+        out("ERR", "refusing to save into " + what + " - it is not owned by you, so another principal could move it mid-save")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        out("ERR", "refusing to save into " + what + " - it is group- or world-writable, so another principal could replace it mid-save")
+    return st
 try:
     libfd = os.open(lib, os.O_RDONLY | os.O_DIRECTORY)
 except OSError as e:
     out("ERR", "cannot open the wallpaper library " + lib + ": " + e.strerror)
-dirfd, where = libfd, lib
+trusted(libfd, lib)
+dirfd = libfd
+where = fdpath(libfd, lib)
 if sub:
     # A provider label is ONE component. Anything else is a caller bug, and a
     # caller bug here is a directory traversal.
@@ -268,9 +298,30 @@ if sub:
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
             out("ERR", "refusing to save through " + lib + "/" + sub +
-                " — the provider folder is a symlink, not a directory in the library")
+                " - the provider folder is a symlink, not a directory in the library")
         out("ERR", "cannot open " + lib + "/" + sub + ": " + e.strerror)
-    where = lib + "/" + sub
+    trusted(dirfd, lib + "/" + sub)
+    where = fdpath(dirfd, lib + "/" + sub)
+# Every exit that hands back a pathname goes through here: the string must
+# still name the very object the descriptor checked, by identity and not by
+# spelling. This applies to a REUSED file exactly as much as to a created
+# one. The caller cannot tell the two apart, and neither can an attacker.
+def settled(st, name, tag):
+    # Ask the kernel where the descriptor lives NOW. If the directory was
+    # renamed while we worked, this names it under its new name, which is
+    # still the object that was checked and written; the identity test below
+    # then confirms the string really does resolve to that file. An attacker
+    # who swapped the ORIGINAL name for a symlink gains nothing: we never
+    # return that name, and if anything at all fails to line up we refuse.
+    final = fdpath(dirfd, where) + "/" + name
+    try:
+        fs = os.stat(final)
+        if (fs.st_dev, fs.st_ino) != (st.st_dev, st.st_ino):
+            raise OSError(0, "identity changed")
+    except OSError:
+        out("ERR", "the provider folder changed underneath the save - " + final +
+            " no longer refers to the file that was checked; refusing to hand back a path that moved")
+    out(tag, final)
 try:
     with open(src, "rb") as f:
         data = f.read()
@@ -287,19 +338,22 @@ while n <= 99:
         # symlink: an alias to identical bytes is still not that file, and
         # adopting it would put a pointer in the library under its own name.
         try:
-            st = os.lstat(name, dir_fd=dirfd)
-            import stat as _s
-            if _s.S_ISREG(st.st_mode):
-                efd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
-                try:
-                    with os.fdopen(efd, "rb") as g:
-                        same = g.read() == data
-                finally:
-                    pass
-                if same:
-                    out("REUSED", where + "/" + name)
+            efd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
         except OSError:
-            pass
+            n += 1
+            continue
+        same = False
+        try:
+            est = os.fstat(efd)
+            if stat.S_ISREG(est.st_mode):
+                with os.fdopen(efd, "rb") as g:
+                    same = g.read() == data
+            else:
+                os.close(efd)
+        except OSError:
+            same = False
+        if same:
+            settled(est, name, "REUSED")
         n += 1
         continue
     except OSError as e:
@@ -311,23 +365,8 @@ while n <= 99:
         os.chmod(name, 0o644, dir_fd=dirfd, follow_symlinks=False)
     except OSError as e:
         out("ERR", "cannot write " + where + "/" + name + ": " + e.strerror)
-    # The bytes are safely inside the checked directory, but the PATH we are
-    # about to hand back is a string, and the caller resolves it again for the
-    # xattr, the size probe and the wallpaper set. If the provider name was
-    # swapped while we worked, that string now resolves somewhere else — so
-    # prove it still names the file just written, by identity rather than by
-    # spelling, and fail closed if it does not.
-    final = where + "/" + name
-    try:
-        fs = os.stat(final)
-        if (fs.st_dev, fs.st_ino) != (st.st_dev, st.st_ino):
-            raise OSError(0, "identity changed")
-    except OSError:
-        out("ERR", "the provider folder changed underneath the save — the file "
-            "was written inside the library, but " + final + " no longer refers "
-            "to it; refusing to continue with a path that moved")
-    out("SAVED", final)
-out("ERR", "cannot save into " + where + " — 99 names starting " + base + " are taken")
+    settled(st, name, "SAVED")
+out("ERR", "cannot save into " + where + " - 99 names starting " + base + " are taken")
 '
 
 save_wallpaper() {

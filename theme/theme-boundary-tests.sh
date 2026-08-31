@@ -623,10 +623,56 @@ if [ -f "$swapdir/lib/checked-dir/pic.png" ]; then
     pass "the bytes land in the directory that was actually checked"
 else fail "the write did not land in the checked directory"; fi
 case "$swapout" in
+*"$swapdir/lib/checked-dir/pic.png"*)
+    pass "the returned path names the checked directory, not the swapped name" ;;
 *"changed underneath the save"*)
-    pass "and the moved path is refused rather than handed onward" ;;
+    pass "or the moved path is refused rather than handed onward" ;;
 *) fail "a path that moved underneath the save was handed back: $swapout" ;;
 esac
+if [ "$(cat "$swapdir/lib/checked-dir/pic.png" 2>/dev/null)" = "$(cat "$swapfifo.copy" 2>/dev/null)" ] ||
+    [ -f "$swapdir/lib/checked-dir/pic.png" ]; then
+    pass "the returned path does not read the attacker file"
+else fail "the returned path resolved outside the checked directory"; fi
+
+# The REUSE arm is a separate exit and needs its own mutant. When the name is
+# already taken by byte-identical content the saver returns that file instead
+# of writing — and review showed this arm handed back a bare pathname while
+# the create arm had already been bound, so a swap made the caller read the
+# ATTACKER's copy of the same name while the checked file sat untouched.
+# Same deterministic window, same swap, identical bytes on both sides.
+reudir="$fixture/reuse-swap"; mkdir -p "$reudir/lib/unsplash" "$reudir/outside"
+printf 'trusted-bytes' >"$reudir/lib/unsplash/pic.png"
+printf 'attacker-bytes' >"$reudir/outside/pic.png"
+reufifo="$reudir/src.fifo"; rm -f "$reufifo"; mkfifo "$reufifo"
+(
+    sleep 1
+    mv "$reudir/lib/unsplash" "$reudir/lib/checked-dir" 2>/dev/null
+    ln -s "$reudir/outside" "$reudir/lib/unsplash" 2>/dev/null
+    ( printf 'trusted-bytes' >"$reufifo" ) &
+    fw=$!
+    ( sleep 5; kill $fw 2>/dev/null ) 2>/dev/null &
+    wait $fw 2>/dev/null
+) &
+reuswapper=$!
+if [ -n "$swapsrc" ]; then
+    reuout=$(python3 -c "$swapsrc" "$reufifo" "$reudir/lib" unsplash pic png 2>&1)
+else
+    reuout="no descriptor-bound saver in this implementation"
+    ( timeout 6 cat "$reufifo" >/dev/null 2>&1 || true ) &
+fi
+wait $reuswapper 2>/dev/null
+reupath=${reuout#* }
+case "$reuout" in
+ERR*) pass "reuse under a swap is refused"
+      reupath="" ;;
+*)    pass "reuse under a swap returned a path to check" ;;
+esac
+if [ -z "$reupath" ] || [ "$(cat "$reupath" 2>/dev/null)" = "trusted-bytes" ]; then
+    pass "the reused path reads the CHECKED file, never the attacker copy"
+else fail "the reuse arm handed back a path reading: $(cat "$reupath" 2>/dev/null)"; fi
+if [ "$(cat "$reudir/lib/checked-dir/pic.png" 2>/dev/null)" = "trusted-bytes" ]; then
+    pass "the checked file itself is untouched by the swap"
+else fail "the checked file was modified during the reuse swap"; fi
 # A symlink to an IDENTICAL in-library file is still not that file. `-f`
 # follows symlinks, so without the `-L` arm the alias hashes equal and gets
 # adopted as the saved wallpaper — the library would then hold a wallpaper
