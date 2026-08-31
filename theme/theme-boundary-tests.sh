@@ -519,6 +519,42 @@ if WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1
     bash "$THEME" list 2>/dev/null | grep -q 'newest 10 of [0-9]* — more:'; then
     pass "default list bounds to the newest 10 with an honest footer"
 else fail "default list bound or footer missing (LIST_N default drifted?)"; fi
+# --- the contrast floor must actually be reached, on ANY background --------
+# The endpoint (white or black) was chosen by background LIGHTNESS, which is
+# the wrong test: on a mid-tone background the lighter side can be the weaker
+# one, and nothing checked the result afterwards. Review measured an accent
+# rewritten to #ffffff at 2.32:1 under a 4.5 request, while black would have
+# given 9.04:1. So this case MEASURES the output rather than trusting it.
+floorpy=$(sed -n "/^PALETTE_FLOOR_PY='/,/^'/p" "$THEME" |
+    sed "1s/^PALETTE_FLOOR_PY='//; \$s/^'//")
+fdir="$fixture/floor"; mkdir -p "$fdir"
+printf '#aaaaaa\n#777777\n' >"$fdir/colors"
+for _ in $(seq 2 15); do printf '#303030\n' >>"$fdir/colors"; done
+printf 'foreground #777777\ncolor0 #aaaaaa\ncolor1 #777777\n' >"$fdir/colors-kitty.conf"
+WAL_DIR="$fdir" OPACITY=1 WP_AVG=aaaaaa FLOOR=4.5 python3 -c "$floorpy" >/dev/null 2>&1
+floorres=$(sed -n 2p "$fdir/colors")
+floormeas=$(FLOORED="$floorres" python3 -c '
+import os
+def rgb(h):
+    h = h.lstrip("#"); return [int(h[i:i+2], 16) for i in (0, 2, 4)]
+def lum(c):
+    def ch(x):
+        x /= 255
+        return x/12.92 if x <= 0.03928 else ((x+0.055)/1.055)**2.4
+    return 0.2126*ch(c[0]) + 0.7152*ch(c[1]) + 0.0722*ch(c[2])
+a, b = lum(rgb(os.environ["FLOORED"])), lum(rgb("#aaaaaa"))
+hi, lo = max(a, b), min(a, b)
+print("%.3f %d" % ((hi+0.05)/(lo+0.05), 1 if a < b else 0))
+' 2>/dev/null)
+floorratio=${floormeas%% *}; floordark=${floormeas##* }
+if [ -n "$floorratio" ] && [ "${floorratio%%.*}" -ge 4 ] &&
+    awk "BEGIN{exit !($floorratio >= 4.5)}"; then
+    pass "a mid-tone background still reaches the requested floor ($floorratio:1)"
+else fail "mid-tone floor not reached: got ${floorratio:-none}:1 against 4.5"; fi
+if [ "$floordark" = 1 ]; then
+    pass "and it moved to the DARKER side, the reachable one here"
+else fail "the floor moved toward the endpoint that cannot reach it"; fi
+
 # --- a DANGLING symlink is an occupied name, not a free one -----------------
 # `[ -e ]` follows symlinks, so a dangling one reads as a vacant slot and the
 # save below lands on its target — outside the library entirely. The download

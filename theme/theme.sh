@@ -516,17 +516,31 @@ def ratio(c1, c2):
 cols = [l.strip() for l in open(d + "/colors")][:16]
 bg = rgb(cols[0]); w = rgb(wp)
 eff = [round(a*b + (1-a)*x) for b, x in zip(bg, w)]
-target = [255]*3 if lum(eff) < 0.5 else [0]*3
-def floored(h):
-    c = rgb(h)
-    if ratio(c, eff) >= floor: return h
+def solve(c, target):
+    # Smallest mix toward this endpoint that reaches the floor, or None when
+    # even the endpoint itself cannot (mid-tone backgrounds reach one side
+    # only — choosing by background lightness alone picked the WRONG side
+    # and shipped 2.3:1 under a 4.5 request).
+    if ratio(target, eff) < floor: return None
     lo, hi = 0.0, 1.0
     for _ in range(24):
         m = (lo+hi) / 2
         cand = [round(cc + (t-cc)*m) for cc, t in zip(c, target)]
         if ratio(cand, eff) >= floor: hi = m
         else: lo = m
-    return hexs([round(cc + (t-cc)*hi) for cc, t in zip(c, target)])
+    return hi, [round(cc + (t-cc)*hi) for cc, t in zip(c, target)]
+def floored(h):
+    c = rgb(h)
+    if ratio(c, eff) >= floor: return h
+    best = None
+    for target in ([255]*3, [0]*3):
+        s = solve(c, target)
+        if s and (best is None or s[0] < best[0]): best = s
+    if best: return hexs(best[1])
+    # Floor unreachable against this blend: take the strongest endpoint
+    # rather than silently keeping an unreadable color.
+    wht, blk = [255]*3, [0]*3
+    return hexs(wht if ratio(wht, eff) >= ratio(blk, eff) else blk)
 new = [cols[0]] + [floored(c) for c in cols[1:16]]
 open(d + "/colors", "w").write("\n".join(new) + "\n")
 k = open(d + "/colors-kitty.conf").read()
