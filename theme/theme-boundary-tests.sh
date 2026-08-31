@@ -494,6 +494,38 @@ exists "download landed inside the library"    yes "$lib/hijacked-2.png"
 if [ -L "$lib/hijacked.png" ]; then pass "the hijacking symlink is left alone"
 else fail "the hijacking symlink was replaced or removed"; fi
 
+# --- the PROVIDER SUBDIRECTORY is not a way out of the library -------------
+# The noclobber write defends the leaf and only the leaf. Downloads now land
+# in a per-provider subfolder, which is a PARENT component — and `mkdir -p`
+# is perfectly happy when that last component already exists as a SYMLINK.
+# A pre-planted `unsplash -> elsewhere` would therefore receive every
+# download, outside the library, with no name collision to make it visible.
+# The save must refuse, write nothing anywhere, and leave the planted link
+# untouched for the owner to find.
+symlib="$fixture/subdir-lib"; symout="$fixture/subdir-out"
+mkdir -p "$symlib" "$symout"
+ln -s "$symout" "$symlib/unsplash"
+symerr=$(PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$symlib" THEME_NO_APPLY=1 \
+    TMPDIR="$fixture/tmpdir" bash "$THEME" url https://images.unsplash.com/pic.png 2>&1)
+if [ "$(find "$symout" -type f | wc -l | tr -d ' ')" = 0 ]; then
+    pass "a symlinked provider folder receives nothing"
+else fail "the download escaped through the symlinked provider folder"; fi
+if [ "$(find -P "$symlib" -type f | wc -l | tr -d ' ')" = 0 ]; then
+    pass "and nothing was written into the library either"
+else fail "a file appeared in the library after the refusal"; fi
+if [ -L "$symlib/unsplash" ]; then pass "the planted provider symlink is left alone"
+else fail "the planted provider symlink was replaced or removed"; fi
+case "$symerr" in
+*"refusing to save"*) pass "the refusal says it is refusing to save" ;;
+*) fail "the parent-symlink refusal was silent or unclear" ;;
+esac
+# The same boundary, without a symlink: an ordinary provider folder inside the
+# library must still work, or the check above would be indistinguishable from
+# a tool that simply stopped saving.
+okslib="$fixture/subdir-ok"; mkdir -p "$okslib"
+PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$okslib" THEME_NO_APPLY=1 \
+    TMPDIR="$fixture/tmpdir" bash "$THEME" url https://images.unsplash.com/fine.png >/dev/null 2>&1
+exists "an ordinary provider folder still receives the download" yes "$okslib/unsplash/fine.png"
 # A symlink to an IDENTICAL in-library file is still not that file. `-f`
 # follows symlinks, so without the `-L` arm the alias hashes equal and gets
 # adopted as the saved wallpaper — the library would then hold a wallpaper

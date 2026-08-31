@@ -220,7 +220,7 @@ fetch_img() {
 # pinterest/, …) — the library is recursive, so list/set/preview see them
 # either way; an empty SAVE_SUBDIR keeps the library root.
 save_wallpaper() {
-    local ext base dest n dir
+    local ext base dest n dir libreal dirreal
     case "$2" in
     image/jpeg) ext=jpg ;; image/png) ext=png ;; image/webp) ext=webp ;;
     image/gif) ext=gif ;; image/avif) ext=avif ;; *) ext="${2#image/}" ;;
@@ -229,6 +229,31 @@ save_wallpaper() {
     [ -n "$base" ] || base="wallpaper-$(date +%Y%m%d-%H%M%S)"
     dir="$WALLPAPER_DIR${SAVE_SUBDIR:+/$SAVE_SUBDIR}"
     mkdir -p "$dir" || die "cannot create $dir"
+    # The noclobber write below defends the LEAF and only the leaf. The
+    # provider subdirectory is a PARENT component, and mkdir -p is happy to
+    # "create" a path whose last component already exists as a symlink — so a
+    # pre-planted `unsplash -> /somewhere/else` silently receives every
+    # download, outside the library, with no name collision to notice.
+    #
+    # Prove the directory belongs to the library before writing through it:
+    # not a symlink itself, and canonically the library root or a descendant.
+    # `cd`+`pwd -P` resolves every component, so a symlink anywhere along the
+    # path lands outside and is refused. $dir is then REPLACED by its
+    # canonical form, which is what binds the check to the write: the
+    # destination is opened through the physical directory that was checked,
+    # not through a name that could be re-pointed afterwards.
+    if [ -n "${SAVE_SUBDIR:-}" ] && [ -L "$dir" ]; then
+        die "refusing to save through $dir — the provider folder is a symlink, not a directory in the library"
+    fi
+    libreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) ||
+        die "cannot resolve the wallpaper library $WALLPAPER_DIR"
+    dirreal=$(cd "$dir" 2>/dev/null && pwd -P) ||
+        die "cannot resolve $dir"
+    case "$dirreal" in
+    "$libreal" | "$libreal"/*) ;;
+    *) die "refusing to save outside the wallpaper library — $dir resolves to $dirreal, which is not under $libreal" ;;
+    esac
+    dir="$dirreal"
     dest="$dir/$base.$ext"
     n=2
     # ONE mechanism answers both "is this name free?" and "write it": bash's
