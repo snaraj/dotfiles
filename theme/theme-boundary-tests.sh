@@ -61,6 +61,32 @@ exists() { # $1 description, $2 yes|no, $3 path
     else fail "$1"; fi
 }
 
+# The AMBIENT credential environment is neutralised once, here, for the whole
+# fixture. Pinning it at individual call sites is whack-a-mole: review found a
+# single unpinned invocation (the contributor-credit case) that inherited an
+# exported UNSPLASH_USER_TOKEN, and a hostile one — the same quote/newline
+# value this fixture uses elsewhere — turned the suite red on a machine where
+# nothing in the tool had changed. Nineteen other direct invocations had the
+# same exposure. A fixture whose result depends on the operator's shell is not
+# measuring the code, so every credential a case needs is now set BY that
+# case, explicitly, and nothing arrives from outside.
+outer_token="${UNSPLASH_USER_TOKEN-}"
+export UNSPLASH_USER_TOKEN="" UNSPLASH_ACCESS_KEY="" UNSPLASH_SECRET_KEY=""
+
+# Two ways to catch the neutralisation going away again. The structural one
+# fires on any machine, dirty environment or not; the runtime one measures
+# what a child process actually receives. Deleting the export above turns the
+# first red immediately, which is the point — a hermeticity claim that only
+# holds when the operator happens to have an empty environment is not one.
+if grep -q '^export UNSPLASH_USER_TOKEN="" UNSPLASH_ACCESS_KEY="" UNSPLASH_SECRET_KEY=""$' "$0" &&
+    [ "$(grep -c '^export UNSPLASH_USER_TOKEN' "$0")" = 1 ]; then
+    pass "the fixture neutralises the ambient credential environment exactly once"
+else fail "the fixture no longer neutralises the ambient credential environment"; fi
+child_env=$(bash -c 'printf "%s|%s|%s" "${UNSPLASH_USER_TOKEN-unset}" "${UNSPLASH_ACCESS_KEY-unset}" "${UNSPLASH_SECRET_KEY-unset}"')
+if [ "$child_env" = "||" ]; then
+    pass "no ambient credential reaches an unpinned child (outer token was ${#outer_token} bytes)"
+else fail "an ambient credential reached an unpinned child: $child_env"; fi
+
 fixture=$(mktemp -d -t theme-boundary) || exit 1
 trap 'rm -rf "$fixture"' EXIT
 lib="$fixture/library"
@@ -572,10 +598,67 @@ if chmod +a "everyone allow add_file,delete_child" "$acldir/lib" 2>/dev/null; th
     SAVED*) pass "a DENY ace is not mistaken for a write grant" ;;
     *) fail "a benign deny-delete ACL blocked the save: $denyout" ;;
     esac
+    # writesecurity is ACL ADMINISTRATION, not a direct write. A predicate
+    # that lists only the direct rights certifies this directory, and the
+    # principal then rewrites the ACL to give itself add_file a moment later.
+    wsdir="$fixture/acl-ws"; mkdir -p "$wsdir/lib"
+    printf 'x' >"$wsdir/src.png"
+    chmod +a "everyone allow writesecurity" "$wsdir/lib" 2>/dev/null
+    wsout=$(python3 -c "$swapsrc" "$wsdir/src.png" "$wsdir/lib" unsplash pic png 2>&1)
+    chmod -a "everyone allow writesecurity" "$wsdir/lib" 2>/dev/null
+    case "$wsout" in
+    ERR*ACL\ granting*writesecurity*) pass "an ACL granting writesecurity is refused (it can grant itself the rest)" ;;
+    *) fail "a writesecurity-granting library was accepted: $wsout" ;;
+    esac
+    exists "and nothing was written into the writesecurity library" no "$wsdir/lib/unsplash/pic.png"
 else
-    pass "ACL mutant skipped: this platform has no chmod +a"
-    pass "ACL deny-vs-allow mutant skipped: this platform has no chmod +a"
+    # NOT a pass. `chmod +a` is unavailable, so the darwin-native cases could
+    # not run; the forced-platform cases immediately below carry this boundary
+    # on every platform, which is why a skip here certifies nothing.
+    echo "SKIP  darwin-native ACL cases: this platform has no chmod +a"
 fi
+
+# --- the ACL audit has to hold where the interrogator is MISSING ------------
+# Review forced the non-darwin branch with getfacl absent and the shipped
+# helper failed OPEN: the mode check alone governed, which is the check that
+# was already shown to be insufficient, and the documented Ubuntu install path
+# does not pull in `acl`. These three cases run on every platform — no
+# chmod +a, no skip — so this boundary is never certified by a skipped mutant.
+cat >"$fixture/acl-forced.py" <<'PYFORCE'
+import os, sys, shutil
+sys.platform = "linux"
+if os.environ.get("FORCE_NO_GETFACL"):
+    _w = shutil.which
+    shutil.which = lambda n, *a, **k: None if n == "getfacl" else _w(n, *a, **k)
+exec(compile(open(os.environ["SAVE_PY_FILE"]).read(), "SAVE_PY", "exec"))
+PYFORCE
+printf '%s' "$swapsrc" >"$fixture/save-py.txt"
+fdir="$fixture/facl"; mkdir -p "$fdir/lib" "$fdir/bin"
+printf 'x' >"$fdir/src.png"
+
+nofacl=$(SAVE_PY_FILE="$fixture/save-py.txt" FORCE_NO_GETFACL=1 \
+    python3 "$fixture/acl-forced.py" "$fdir/src.png" "$fdir/lib" unsplash a png 2>&1)
+case "$nofacl" in
+ERR*cannot\ be\ audited\ for\ ACLs*getfacl*) pass "off macOS, a missing getfacl refuses the save with an actionable error" ;;
+*) fail "a missing ACL interrogator failed open: $nofacl" ;;
+esac
+exists "and nothing was written without an ACL audit" no "$fdir/lib/unsplash/a.png"
+
+printf '#!/bin/sh\necho "group:staff:rwx"\n' >"$fdir/bin/getfacl"; chmod +x "$fdir/bin/getfacl"
+gfgrant=$(PATH="$fdir/bin:$PATH" SAVE_PY_FILE="$fixture/save-py.txt" \
+    python3 "$fixture/acl-forced.py" "$fdir/src.png" "$fdir/lib" unsplash b png 2>&1)
+case "$gfgrant" in
+ERR*ACL\ granting*) pass "off macOS, a getfacl-reported group write grant is refused" ;;
+*) fail "a POSIX ACL write grant was accepted: $gfgrant" ;;
+esac
+
+printf '#!/bin/sh\necho "user::rwx"\necho "group::r-x"\necho "other::r-x"\n' >"$fdir/bin/getfacl"
+gfclean=$(PATH="$fdir/bin:$PATH" SAVE_PY_FILE="$fixture/save-py.txt" \
+    python3 "$fixture/acl-forced.py" "$fdir/src.png" "$fdir/lib" unsplash c png 2>&1)
+case "$gfclean" in
+SAVED*) pass "off macOS, an ACL with no foreign write grant still saves" ;;
+*) fail "a clean POSIX ACL blocked the save: $gfclean" ;;
+esac
 
 # --- the contrast floor must actually be reached, on ANY background --------
 # The endpoint (white or black) was chosen by background LIGHTNESS, which is
@@ -997,7 +1080,12 @@ rm -f "$sweepbin/uname"
 STUB_WHO=$(printf 'Contributor\033]52;c;UkVNT1RF\007')
 export STUB_WHO
 wholog="$fixture/curl-who.log"; : >"$wholog"
+# Client-ID case: the token and secret are pinned empty here too, so this one
+# stays on the Client-ID path even if the global neutralisation above is ever
+# weakened. Belt and braces, because this is the call site review caught.
 who_out=$(CURL_LOG="$wholog" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
+    UNSPLASH_SECRET_KEY='' \
+    UNSPLASH_USER_TOKEN='' \
     THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
     bash "$THEME" unsplash https://unsplash.com/photos/whoslug-abcdef12345 2>&1)
 unset STUB_WHO

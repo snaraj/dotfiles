@@ -269,24 +269,33 @@ def fdpath(fd, fallback):
 # just the two directories being written into. Review demonstrated both gaps:
 # a 0777 grandparent let the library entry itself be swapped after the save
 # returned, and an ACL write grant passed a mode-only test.
-def acl_grants_write(path):
-    # macOS ACLs grant write independently of the POSIX mode - the mode still
-    # reads 0755 while another principal holds add_file/delete_child. Only
-    # ALLOW entries granting a write-shaped right to someone who is not us
-    # count: a DENY entry restricts rather than grants, and every macOS home
-    # directory carries `group:everyone deny delete`, so treating any ACE at
-    # all as dangerous would refuse every ordinary account. `ls -lde` prints
-    # ACEs as numbered lines; a trailing @ on the mode means extended
-    # ATTRIBUTES, not an ACL, and is irrelevant here.
+def acl_write_grant(path):
+    # Returns a REASON to refuse, or None. macOS ACLs grant write
+    # independently of the POSIX mode - the mode still reads 0755 while
+    # another principal holds add_file/delete_child. Only ALLOW entries
+    # granting a write-shaped right to someone who is not us count: a DENY
+    # entry restricts rather than grants, and every macOS home directory
+    # carries `group:everyone deny delete`, so treating any ACE at all as
+    # dangerous would refuse every ordinary account. `ls -lde` prints ACEs as
+    # numbered lines; a trailing @ on the mode means extended ATTRIBUTES, not
+    # an ACL, and is irrelevant here.
+    #
+    # The set below includes the INDIRECT grants as well as the direct ones.
+    # writesecurity is ACL administration: a principal holding it can simply
+    # rewrite the ACL to give itself add_file and delete_child, so a predicate
+    # that only knows the direct rights certifies a directory that can grant
+    # itself write a moment later. chown is here for the same reason - owning
+    # the object confers the same authority.
     grants = ("write", "append", "delete", "delete_child", "add_file",
-              "add_subdirectory", "chown", "writeattr", "writeextattr")
+              "add_subdirectory", "chown", "writeattr", "writeextattr",
+              "writesecurity")
     try:
         if sys.platform == "darwin":
             me = pwd.getpwuid(os.getuid()).pw_name
             r = subprocess.run(["/bin/ls", "-lde", path],
                                capture_output=True, text=True, timeout=10)
             if r.returncode != 0:
-                return True
+                return "could not be audited for ACLs: ls -lde failed"
             for ln in r.stdout.splitlines():
                 m = re.match(r"\s*\d+:\s*(.*)$", ln)
                 if not m:
@@ -297,19 +306,27 @@ def acl_grants_write(path):
                     continue
                 who = parts[0]
                 perms = parts[-1].split(",")
-                if not any(g in perms for g in grants):
+                hit = [g for g in grants if g in perms]
+                if not hit:
                     continue
                 if who in ("user:" + me, me):
                     continue
-                return True
-            return False
+                return ("has an ACL granting " + who + " " + ",".join(hit) +
+                        ", which lets them replace entries regardless of the mode")
+            return None
         g = shutil.which("getfacl")
         if not g:
-            # Nothing available to interrogate; the mode check governs.
-            return False
+            # An uninterrogable directory is an UNPROVEN one, and this
+            # predicate exists precisely because the mode cannot answer the
+            # question. Failing open here would silently downgrade every
+            # non-darwin install to the mode-only check the review rejected -
+            # and the documented Ubuntu path does not install acl by default,
+            # so that downgrade would be the common case rather than a corner.
+            return ("cannot be audited for ACLs: getfacl is not installed"
+                    " - install it (Debian/Ubuntu: apt install acl)")
         r = subprocess.run([g, "-cp", path], capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
-            return True
+            return "could not be audited for ACLs: getfacl failed"
         me = pwd.getpwuid(os.getuid()).pw_name
         for ln in r.stdout.splitlines():
             f = ln.strip().split(":")
@@ -319,17 +336,19 @@ def acl_grants_write(path):
             if kind not in ("user", "group") or who == "" or who == me:
                 continue
             if "w" in perm:
-                return True
-        return False
-    except Exception:
-        return True
+                return ("has an ACL granting " + kind + ":" + who +
+                        " write, which lets them replace entries regardless of the mode")
+    except Exception as e:
+        return "could not be audited for ACLs: " + str(e)
+    return None
 def audit_dir(path, st):
     if st.st_uid not in (0, os.getuid()):
         out("ERR", "refusing to save: " + path + " is owned by another user, so it can be replaced underneath the saved path")
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         out("ERR", "refusing to save: " + path + " is group- or world-writable, so another principal can replace entries in it")
-    if acl_grants_write(path):
-        out("ERR", "refusing to save: " + path + " has an ACL granting another principal write, which lets them replace entries regardless of the mode")
+    why = acl_write_grant(path)
+    if why:
+        out("ERR", "refusing to save: " + path + " " + why)
 def audit_chain(path):
     # Canonical, so a symlinked component is audited as what it really is.
     q = os.path.realpath(path)

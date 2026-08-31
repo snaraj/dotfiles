@@ -292,6 +292,14 @@ Required:
 | `curl` | preinstalled | All downloads |
 | `python3` | preinstalled (or `brew install python`) | Parsing Unsplash JSON and `og:` meta tags |
 | `file`, `sed`, `awk`, `find`, `shasum` | preinstalled | Typing, slugifying, dedupe |
+| `getfacl` (**non-macOS only**) | `apt install acl` | Auditing the save path for ACL write grants. macOS uses the preinstalled `ls -lde` instead. |
+
+`getfacl` is a hard requirement off macOS, not a nicety. A POSIX mode of 0755
+says nothing about an ACL that hands another principal `add_file`, so a
+download whose destination cannot be interrogated is refused rather than
+saved: `refusing to save: <dir> cannot be audited for ACLs`. The alternative
+would be to trust the mode alone, which is exactly the check that was shown
+to be insufficient.
 
 Optional: `sips` (macOS, preinstalled) gives exact image dimensions; without it
 `file` is used, which is slightly less reliable on exotic formats. `kitty` need
@@ -318,7 +326,7 @@ recreate it with the `ln -sf` line above.
 The palette half works unchanged; the desktop half depends on the session:
 
 ```sh
-sudo apt install pipx curl file imagemagick
+sudo apt install pipx curl file imagemagick acl
 pipx install pywal          # or: pip install --user pywal
 ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
 ```
