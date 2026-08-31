@@ -1224,7 +1224,7 @@ cmd_rename() {
 }
 
 usage() {
-    local desk inc label colors term os
+    local desk inc label colors term os name sw i line
     desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
     case "$inc" in
@@ -1232,15 +1232,12 @@ usage() {
     *colors-kitty.conf) label="" ;;
     *) label="$(basename "${inc%.conf}")" ;;
     esac
-    printf '  current theme:      %s\n' "$(display_text "${desk:-<none>}")"
     colors=$(scheme_colors)
     if [ -n "$colors" ]; then
-        printf '  colorscheme:        '
         # shellcheck disable=SC2046
-        swatch_row $(printf '%s\n' "$colors" | head -8)
-        printf '%s\n' "${label:+ $(display_text "$label")}"
+        sw="$(swatch_row $(printf '%s\n' "$colors" | head -8))${label:+ $(display_text "$label")}"
     else
-        printf '  colorscheme:        <none>\n'
+        sw='<none>'
     fi
     # This header printfs directly instead of going through note(), so each
     # runtime value needs its own display copy — $desk and $label above, $term
@@ -1255,7 +1252,6 @@ usage() {
         # clipboard write in either, and this line prints it as a fact.
         term=$(display_text "${TERM_PROGRAM:-$TERM}")
     fi
-    printf '  terminal:           %s\n' "$term"
     # uname/sw_vers are resolved through PATH, so this output is not ours to
     # trust either, and being sure costs one call.
     if [ "$(uname -s)" = Darwin ]; then
@@ -1263,7 +1259,42 @@ usage() {
     else
         os=$(uname -srm)
     fi
-    printf '  os:                 %s\n' "$(display_text "$os")"
+    os=$(display_text "$os")
+    # The header borrows preview's shape: the CURRENT background rendered on
+    # the left (kitty graphics; text-only elsewhere), facts on the right. The
+    # title is bounded like preview's — a wrapped line shreds the block.
+    if [ -n "$desk" ]; then
+        name=$(basename "$desk"); name="${name%.*}"; name=$(display_text "$name")
+    else
+        name='<none>'
+    fi
+    local cols availw
+    cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
+    availw=$((cols - 18 - 13))
+    [ "$availw" -lt 12 ] && availw=12
+    [ "${#name}" -gt "$availw" ] && name="$(printf '%.*s' $((availw - 1)) "$name")…"
+    local rlines=(
+        ""
+        "$(printf '%-12s %s' THEME "$name")"
+        "$(printf '%-12s %s' COLORSCHEME "$sw")"
+        "$(printf '%-12s %s' TERMINAL "$term")"
+        "$(printf '%-12s %s' OS "$os")"
+        ""
+    )
+    PV_APC=""; PV_ROWS=(); PV_H=0
+    if [ -n "$desk" ] && [ -f "$desk" ] && render_preview "$desk" 14 6; then
+        printf '%s' "$PV_APC"
+        i=0
+        while [ "$i" -lt 6 ]; do
+            line="${PV_ROWS[$i]:-$(printf '%-14s' '')}"
+            printf '  %s  %s\n' "$line" "${rlines[$i]:-}"
+            i=$((i + 1))
+        done
+    else
+        for line in "${rlines[@]}"; do
+            [ -n "$line" ] && printf '  %s\n' "$line"
+        done
+    fi
     cat <<EOF
 
 Apply Commands:

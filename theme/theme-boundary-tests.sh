@@ -396,6 +396,15 @@ else pass "unapplied wallpaper lists an honest dash"; fi
 if row 'scheme-bad' | grep -q '48;2;' || [ -s "$listerr" ]; then
     fail "a corrupt cache entry produced a swatch or an error"
 else pass "corrupt cache entry degrades to a dash, silently"; fi
+
+# --- the DEFAULT listing is bounded: newest 10, honestly labelled -----------
+# run_list above passes --all precisely because of this bound — without it the
+# ownership rows fall off the listing. This library holds 12+ images, so a
+# default run must stop at 10 and SAY so in the footer.
+if WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    bash "$THEME" list 2>/dev/null | grep -q 'newest 10 of [0-9]* — more:'; then
+    pass "default list bounds to the newest 10 with an honest footer"
+else fail "default list bound or footer missing (LIST_N default drifted?)"; fi
 # --- a DANGLING symlink is an occupied name, not a free one -----------------
 # `[ -e ]` follows symlinks, so a dangling one reads as a vacant slot and the
 # save below lands on its target — outside the library entirely. The download
