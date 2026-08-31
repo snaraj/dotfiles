@@ -710,18 +710,26 @@ def main():
     if not args.leave_running:
         lab.kill_kitty()
     else:
-        # Retention and custody are committed together, in that order and
-        # only here: the flag flips immediately before the message that tells
-        # the operator what they now own. Reaching this line means every
-        # phase completed, so nothing can be retained without being reported,
-        # and nothing that failed earlier can be retained at all.
+        # Custody is EMITTED AND FLUSHED FIRST, with cleanup still armed, and
+        # only a message that actually reached the operator commits retention.
+        # Flipping the flag before the writes meant a failing stdout - a
+        # closed pipe is enough - retained the process while the text saying
+        # so never arrived: silent retention, the exact thing this branch
+        # exists to prevent. Fail-closed the other way round is cheap: stale
+        # custody text describing a process that was safely reaped costs
+        # nothing, an unreported live process costs the operator a window
+        # they cannot find.
+        pid = lab.proc.pid if lab.proc else None
+        sys.stdout.write(
+            'lab kitty left running (pid %s), socket kept at:\n'
+            '  %s\n'
+            'drive it:  kitten @ --to unix:%s ls\n'
+            'kill it:   kill %s\n'
+            'its private directory is kept too: %s\n'
+            % (pid if pid else '?', lab.sock_path, lab.sock_path,
+               pid if pid else '<pid>', RUNDIR))
+        sys.stdout.flush()
         LEAVE_RUNNING = True
-        print('lab kitty left running (pid %s), socket kept at:'
-              % (lab.proc.pid if lab.proc else '?'))
-        print('  %s' % lab.sock_path)
-        print('drive it:  kitten @ --to unix:%s ls' % lab.sock_path)
-        print('kill it:   kill %s' % (lab.proc.pid if lab.proc else '<pid>'))
-        print('its private directory is kept too: %s' % RUNDIR)
     logf.close()
     return 1 if runner.failed else 0
 
