@@ -6,11 +6,18 @@
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config}"
 KITTY_DIR="${KITTY_CONFIG_DIRECTORY:-$CONFIG_DIR/kitty}"
 CURRENT="$KITTY_DIR/current-theme.conf"
-WALLPAPER_DIR="${WALLPAPER_DIR:-$CONFIG_DIR/wallpapers/pc}"
+# Wallpaper library: EVERY image under this directory, subfolders included.
+# THEME_WALLPAPER_DIR is the CLI's wallpaper knob (WALLPAPER_DIR still
+# honored for older scripts; downloads save to the library root).
+WALLPAPER_DIR="${THEME_WALLPAPER_DIR:-${WALLPAPER_DIR:-$CONFIG_DIR/wallpapers}}"
 WAL_CACHE="${WAL_CACHE:-$HOME/.cache/wal}"
 MIN_WIDTH=2560
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
-IMG_GLOB=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif')
+# Every format the desktop setter AND pywal's backends both handle, so
+# anything listed can actually be SET and derive a scheme. All included by
+# default; THEME_FORMATS replaces the set, THEME_EXCLUDE_FORMATS subtracts
+# (comma- or space-separated, case and leading dots ignored).
+THEME_FORMATS_ALL="jpg jpeg png webp gif bmp tif tiff"
 
 # EVERY message this tool prints passes through one of these two, so this is
 # where control bytes stop — not at whichever call sites someone remembered.
@@ -25,6 +32,26 @@ note() { printf 'theme: %s\n' "$(display_text "$*")"; }
 dry() { [ -n "${THEME_NO_APPLY:-}" ]; }
 
 # --- small utilities -------------------------------------------------------
+
+# IMG_GLOB (find(1) -iname clauses) built from THEME_FORMATS minus
+# THEME_EXCLUDE_FORMATS. An emptied set is refused loudly rather than
+# silently listing nothing.
+build_img_glob() {
+    local inc exc e x skip
+    inc=$(printf '%s' "${THEME_FORMATS:-$THEME_FORMATS_ALL}" | tr ',' ' ' | tr '[:upper:]' '[:lower:]')
+    exc=$(printf '%s' "${THEME_EXCLUDE_FORMATS:-}" | tr ',' ' ' | tr '[:upper:]' '[:lower:]')
+    IMG_GLOB=()
+    for e in $inc; do
+        e="${e#.}"
+        [ -n "$e" ] || continue
+        skip=""
+        for x in $exc; do [ "${x#.}" = "$e" ] && { skip=1; break; }; done
+        [ -n "$skip" ] && continue
+        [ "${#IMG_GLOB[@]}" -gt 0 ] && IMG_GLOB+=(-o)
+        IMG_GLOB+=(-iname "*.$e")
+    done
+    [ "${#IMG_GLOB[@]}" -gt 0 ] || die "THEME_FORMATS/THEME_EXCLUDE_FORMATS leave no formats to list"
+}
 
 slugify() {
     local s
@@ -320,18 +347,55 @@ use_image() {
     note "now: $(basename "$1")$( [ -n "$(img_size "$1")" ] && printf ' (%s)' "$(img_size "$1")")"
 }
 
+# Cache-only scheme derivation for a wallpaper that is NOT being applied:
+# same backend ladder and contrast floor as set_palette so list/preview show
+# the palette `theme set` would produce, but with -n (never touch the
+# desktop) and no CURRENT write / kitty reload.
+derive_scheme() { # $1 file
+    command -v wal >/dev/null 2>&1 || return 1
+    wal -n -i "$1" -s -t -e --backend colorz --contrast 3.0 >/dev/null 2>&1 ||
+        wal -n -i "$1" -s -t -e --backend modern_colorthief --contrast 3.0 >/dev/null 2>&1 ||
+        wal -n -i "$1" -s -t -e --contrast 3.0 >/dev/null 2>&1
+}
+
+# Every library wallpaper gets a scheme, not just the ones already applied:
+# derive whatever is missing, then re-derive the CURRENT wallpaper so wal's
+# per-run export files (colors-kitty.conf and friends — what a fresh kitty
+# window reads through $CURRENT) describe the applied theme again, not the
+# last backfilled image. Re-deriving a cached wallpaper is a cache read, not
+# an image reprocess, so the restore is cheap. Skipped under THEME_NO_APPLY
+# (it mutates the wal cache).
+backfill_schemes() {
+    dry && return 0
+    local f cur n=0 miss=()
+    while IFS= read -r f; do
+        wall_scheme "$f" >/dev/null 2>&1 || miss+=("$f")
+    done < <(find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null)
+    [ "${#miss[@]}" -eq 0 ] && return 0
+    note "deriving ${#miss[@]} missing colorscheme(s)…"
+    for f in "${miss[@]}"; do derive_scheme "$f" && n=$((n + 1)); done
+    cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+    [ -n "$cur" ] && [ -f "$cur" ] && derive_scheme "$cur"
+    [ "$n" -lt "${#miss[@]}" ] && note "$((${#miss[@]} - n)) wallpaper(s) resisted every backend — still shown as -"
+    return 0
+}
+
 # --- local wallpapers ------------------------------------------------------
 
 # A title copied from `theme list` may be TRUNCATED (trailing … or cut
 # mid-word). Resolve it anyway when it is the prefix of exactly ONE library
 # file; zero or several matches fail — never a guess between candidates.
+# find(1), not a shell glob, so names in subfolders resolve too — the list
+# is recursive, so resolution must be. User input is escaped: a '*' or '['
+# in a typed name must match itself, never widen into a pattern.
+glob_escape() { printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'; }
 prefix_match() { # $1 name-or-prefix
     local p="${1%…}" f hit="" n=0
     p="${p%...}"
     [ -n "$p" ] || return 1
-    for f in "$WALLPAPER_DIR/$p"*; do
+    while IFS= read -r f; do
         [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
-    done
+    done < <(find "$WALLPAPER_DIR" -type f -name "$(glob_escape "$p")*" 2>/dev/null)
     [ "$n" -eq 1 ] || return 1
     printf '%s' "$hit"
 }
@@ -343,9 +407,9 @@ prefix_match() { # $1 name-or-prefix
 # then a truncated title falls through to the same unique-prefix rule.
 library_match() { # $1 stem-or-prefix
     local f hit="" n=0
-    for f in "$WALLPAPER_DIR/$1".*; do
+    while IFS= read -r f; do
         [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
-    done
+    done < <(find "$WALLPAPER_DIR" -type f -name "$(glob_escape "$1").*" 2>/dev/null)
     [ "$n" -eq 1 ] && { printf '%s' "$hit"; return 0; }
     [ "$n" -gt 1 ] && return 1
     prefix_match "$1"
@@ -747,13 +811,15 @@ wall_preview() { # $1 file
 }
 
 # Wallpapers as a table, LATEST ADDED first (APFS birth time): truncated
-# title plus a small render of the scheme that wallpaper derives — snappy,
-# because the scheme comes from pywal's cache, not the image. Source (an
-# xattr/mdls read per file), format, size, date, and the inline picture
+# title plus a small render of the scheme that wallpaper derives. Schemes
+# render from pywal's cache; anything missing is derived first by
+# backfill_schemes (one-time ~1s per new wallpaper, instant after). Source
+# (an xattr/mdls read per file), format, size, date, and the inline picture
 # preview all live behind -v, so the default listing does no per-file
-# metadata work and stays instant.
+# metadata work beyond that.
 cmd_list() {
     local cols namew f name src fmt bytes added c r g b n
+    backfill_schemes
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
     local pvok="" pvw=0
     [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && { pvok=1; pvw=9; }
@@ -827,6 +893,7 @@ cmd_preview() { # $1 optional wallpaper name/path
         img=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
         [ -n "$img" ] && [ -f "$img" ] || die "no current wallpaper to preview — name one: theme preview <wallpaper>"
     fi
+    backfill_schemes
     # Display copies only. $img stays byte-exact — it is what render_preview,
     # img_size, stat and wall_scheme open.
     name=$(basename "$img"); name="${name%.*}"
@@ -954,7 +1021,8 @@ cmd_status() {
     else
         printf '  UNSPLASH_ACCESS_KEY   not set (theme unsplash --help)\n'
     fi
-    printf '  WALLPAPER_DIR         %s\n' "$(display_text "$WALLPAPER_DIR")"
+    printf '  THEME_WALLPAPER_DIR   %s\n' "$(display_text "$WALLPAPER_DIR")"
+    printf '  THEME_FORMATS         %s\n' "$(display_text "${THEME_FORMATS:-$THEME_FORMATS_ALL} ${THEME_EXCLUDE_FORMATS:+(minus: $THEME_EXCLUDE_FORMATS)}")"
     printf '  WAL_CACHE             %s\n' "$(display_text "$WAL_CACHE")"
 }
 
@@ -979,9 +1047,15 @@ resolve_library() {
         cand=$(library_match "$1") || return 1
     fi
     [ -n "$cand" ] || return 1
+    # Canonical containment: the file's physical directory must be the
+    # library root or a descendant of it (the library is recursive now).
+    # A symlink pointing outside still canonicalizes outside and is refused.
     dirreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) || return 1
     real=$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P) || return 1
-    [ "$real" = "$dirreal" ] || return 1
+    case "$real" in
+    "$dirreal" | "$dirreal"/*) ;;
+    *) return 1 ;;
+    esac
     printf '%s' "$cand"
     return 0
 }
@@ -1271,6 +1345,12 @@ EOF
 }
 
 # --- dispatch --------------------------------------------------------------
+
+# Built here, not at the top of the file: an emptied format set dies through
+# display_text, which (like every helper) is only guaranteed defined once the
+# whole file has been read.
+build_img_glob
+
 
 # --rotate left|right turns the image 90° before it is saved and applied, so a
 # portrait Pinterest pin becomes a landscape that fills the desktop. Parsed out

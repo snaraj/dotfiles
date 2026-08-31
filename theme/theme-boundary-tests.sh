@@ -78,9 +78,9 @@ printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA
 printf 'not an image' >"$lib/broken.jpg"
 
 # shellcheck disable=SC2317,SC2329  # run is reached indirectly via check()'s "$@"
-run() { WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
+run() { THEME_WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_nokitty() { WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "${@:2}"; }
+run_nokitty() { THEME_WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "${@:2}"; }
 
 # --- positive destructive ops must MUTATE, not merely exit 0 ---------------
 check  "in-library rm succeeds"                0 run "$lib" rm in-lib.jpg
@@ -145,7 +145,7 @@ else fail "'theme wal' still dispatches instead of being unknown"; fi
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
     base64 -d >"$lib/long-src.png"
 xattr -w theme.source "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bb.invalid/x" "$lib/long-src.png" 2>/dev/null
-pv_out=$(COLUMNS=60 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview long-src 2>/dev/null)
+pv_out=$(COLUMNS=60 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview long-src 2>/dev/null)
 # At 60 columns availw is 25: 24 a's then an ellipsis, and never a 25th 'a'.
 if printf '%s' "$pv_out" | grep -q 'SOURCE       aaaaaaaaaaaaaaaaaaaaaaaa…'; then
     pass "preview truncates a long source (fallback layout)"
@@ -153,18 +153,18 @@ else fail "preview fallback layout leaked a long source"; fi
 if printf '%s' "$pv_out" | grep -q 'aaaaaaaaaaaaaaaaaaaaaaaaa'; then
     fail "preview fallback layout exceeded the column bound"
 else pass "no over-length source run in fallback layout"; fi
-pv_out=$(COLUMNS=60 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID=1 bash "$THEME" preview long-src 2>/dev/null)
+pv_out=$(COLUMNS=60 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID=1 bash "$THEME" preview long-src 2>/dev/null)
 if printf '%s' "$pv_out" | grep -q 'aaaaaaaaaaaaaaaaaaaaaaaa…'; then
     pass "preview truncates a long source (image layout)"
 else fail "preview image layout leaked a long source"; fi
-lv_out=$(COLUMNS=100 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" list -v 2>/dev/null)
+lv_out=$(COLUMNS=100 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" list -v 2>/dev/null)
 if printf '%s' "$lv_out" | grep -q 'aaaaaaaaa…  png'; then
     pass "list -v bounds the SOURCE field"
 else fail "list -v SOURCE field shifted later columns"; fi
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
     base64 -d >"$lib/ctrl-src.png"
 xattr -w theme.source "$(printf 'bad\nline\airl')" "$lib/ctrl-src.png" 2>/dev/null
-pv_out=$(COLUMNS=80 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview ctrl-src 2>/dev/null)
+pv_out=$(COLUMNS=80 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview ctrl-src 2>/dev/null)
 if printf '%s' "$pv_out" | grep -q 'SOURCE       badlineirl'; then
     pass "control bytes in the source xattr are stripped"
 else fail "control bytes reached the preview table"; fi
@@ -230,7 +230,7 @@ chmod +x "$stubdir/curl"
 
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
 run_stub() { CURL_LOG="$1" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
-    WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
+    THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
 
 goodlog="$fixture/curl-good.log"; : >"$goodlog"
 check  "unsplash photo-page URL accepted"      0 run_stub "$goodlog" unsplash https://unsplash.com/photos/winged-slug-coy_MhYMLHs
@@ -362,7 +362,7 @@ printf '{\n    "wallpaper": "%s",\n    "colors": {"color0": "#0102", "color1": "
 
 listout="$fixture/list.out"; listerr="$fixture/list.err"
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_list() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+run_list() { WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
     bash "$THEME" list >"$listout" 2>"$listerr"; }
 row() { grep "^  $1  *" "$listout"; }   # one listing row, by its exact title
 owns() { # $1 description, $2 title, $3 own rgb, $4 rgb it must never show
@@ -406,7 +406,7 @@ exit 0
 EOS
 chmod +x "$urlbin/curl"
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_url() { PATH="$urlbin:$PATH" WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+run_url() { PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
     TMPDIR="$fixture/tmpdir" bash "$THEME" url "$1"; }
 ln -s "$out/redirected.png" "$lib/hijacked.png"
 check  "download onto a hijacked name succeeds" 0 run_url https://img.invalid/hijacked.png
@@ -440,7 +440,7 @@ else fail "free-name download did not produce a regular library file"; fi
 oscname="osc52-safe$(printf '\033]52;c;U0FGRQ==\007')"
 printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/$oscname.png"
 osc_open=$(printf '\033]')
-pv_osc=$(COLUMNS=120 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+pv_osc=$(COLUMNS=120 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
     bash "$THEME" preview osc52- 2>/dev/null)
 if printf '%s' "$pv_osc" | grep -qF -- "$osc_open"; then
     fail "preview emitted a filename's OSC sequence"
@@ -451,7 +451,7 @@ else pass "preview never emits a filename's OSC sequence"; fi
 if printf '%s' "$pv_osc" | grep -q 'osc52-safe'; then
     pass "preview still shows the printable part of the title"
 else fail "preview dropped the whole title instead of its control bytes"; fi
-lv_osc=$(COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+lv_osc=$(COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
     bash "$THEME" list 2>/dev/null)
 if printf '%s' "$lv_osc" | grep -qF -- "$osc_open"; then
     fail "list emitted a filename's OSC sequence"
@@ -465,7 +465,7 @@ srccase() { # $1 description, $2 basename, $3 theme.source value, $4 expected la
     local got
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/$2.png"
     xattr -w theme.source "$3" "$lib/$2.png" 2>/dev/null
-    got=$(COLUMNS=120 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+    got=$(COLUMNS=120 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
         bash "$THEME" preview "$2" 2>/dev/null | sed -n 's/^ *SOURCE  *//p')
     if [ "$got" = "$4" ]; then pass "$1"; else fail "$1 (got '$got', wanted '$4')"; fi
 }
@@ -527,7 +527,7 @@ sweep_all="$fixture/sweep.out"; : >"$sweep_all"
 sweep_bad=""
 sweep() { # $@ = theme arguments; records output, never fails the run
     local o
-    o=$(WALLPAPER_DIR="$sweeplib" WAL_CACHE="$sweepcache" THEME_NO_APPLY=1 \
+    o=$(THEME_WALLPAPER_DIR="$sweeplib" WAL_CACHE="$sweepcache" THEME_NO_APPLY=1 \
         CONFIG_DIR="$sweepcache" KITTY_CONFIG_DIRECTORY="$sweepcache" COLUMNS=120 \
         PATH="$sweepbin:$PATH" \
         TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "$@" 2>&1)
@@ -579,7 +579,7 @@ else fail "sanitizing removed the whole name, not just its control bytes"; fi
 # The sweep above drives COMMANDS. A valid `theme <cmd> --help` takes a
 # different path entirely: usage_cmd's heredocs and usage()'s live header
 # printf directly, so neither passes through note()/die(). Round 12 found
-# WALLPAPER_DIR reaching five heredocs raw, and TERM_PROGRAM/TERM reaching the
+# THEME_WALLPAPER_DIR reaching five heredocs raw, and TERM_PROGRAM/TERM reaching the
 # header raw — environment and configuration data, all of it able to carry an
 # OSC 52 clipboard write. Enumerating those five is exactly how a sixth gets
 # missed, so this drives EVERY valid help path, and `help` itself, rather than
@@ -599,7 +599,7 @@ help_bad=""
 help_all="$fixture/help.out"; : >"$help_all"
 help_run() { # $1 label, $2 TERM_PROGRAM, $3 TERM, $4… theme arguments
     local o
-    o=$(WALLPAPER_DIR="/nonexistent/hlibSAFE$oscpay" WAL_CACHE="$helpcache" \
+    o=$(THEME_WALLPAPER_DIR="/nonexistent/hlibSAFE$oscpay" WAL_CACHE="$helpcache" \
         CONFIG_DIR="$helpcache" KITTY_CONFIG_DIRECTORY="$helpcache" COLUMNS=120 \
         THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' \
         PATH="$sweepbin:$PATH" TERM_PROGRAM="$2" TERM="$3" \
@@ -636,7 +636,7 @@ else fail "help sanitizing removed more than the control bytes:$help_missing"; f
 # The kitty hyperlink is the ONE intentional control sequence in this output.
 # A blanket strip over the whole header would pass every assertion above while
 # silently deleting it, so it gets its own direction.
-kittyout=$(WALLPAPER_DIR="$sweeplib" WAL_CACHE="$helpcache" CONFIG_DIR="$helpcache" \
+kittyout=$(THEME_WALLPAPER_DIR="$sweeplib" WAL_CACHE="$helpcache" CONFIG_DIR="$helpcache" \
     KITTY_CONFIG_DIRECTORY="$helpcache" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
     PATH="$sweepbin:$PATH" KITTY_WINDOW_ID=1 bash "$THEME" help 2>&1)
 if printf '%s' "$kittyout" | grep -qF -- "$(printf '\033]8;;https://sw.kovidgoyal.net/kitty/')"; then
@@ -649,7 +649,7 @@ STUB_WHO=$(printf 'Contributor\033]52;c;UkVNT1RF\007')
 export STUB_WHO
 wholog="$fixture/curl-who.log"; : >"$wholog"
 who_out=$(CURL_LOG="$wholog" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
-    WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
+    THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
     bash "$THEME" unsplash https://unsplash.com/photos/whoslug-abcdef12345 2>&1)
 unset STUB_WHO
 if printf '%s' "$who_out" | grep -qF -- "$osc_open"; then

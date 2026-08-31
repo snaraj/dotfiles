@@ -4,8 +4,8 @@ export CONFIG_DIR=$HOME/.config
 # change default starship config location
 export STARSHIP_CONFIG=$CONFIG_DIR/starship/starship.toml
 
-# default wallpaper location (images used by the theme script)
-export WALLPAPER_DIR=$CONFIG_DIR/wallpapers/pc
+# wallpaper library for the theme CLI — searched recursively, all subfolders
+export THEME_WALLPAPER_DIR=$CONFIG_DIR/wallpapers
 
 # Firefox CSS config file
 export FIREFOX_USER_CHROME="/Users/samuel/Library/Application Support/Firefox/Profiles/wldjcvt7.default-release-1/chrome"

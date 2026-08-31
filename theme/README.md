@@ -213,7 +213,9 @@ two coexist; `theme status` will report whatever is currently included.
 | --- | --- | --- |
 | `CONFIG_DIR` | `~/.config` | Root for everything below |
 | `KITTY_CONFIG_DIRECTORY` | `$CONFIG_DIR/kitty` | Where `current-theme.conf` and `themes/` live |
-| `WALLPAPER_DIR` | `$CONFIG_DIR/wallpapers/pc` | Wallpaper library; downloads land here |
+| `THEME_WALLPAPER_DIR` | `$CONFIG_DIR/wallpapers` | Wallpaper library, searched recursively (subfolders included); downloads land at its root. `WALLPAPER_DIR` still honored as a fallback |
+| `THEME_FORMATS` | `jpg jpeg png webp gif bmp tif tiff` | Formats to list/set (comma or space separated; replaces the default set) |
+| `THEME_EXCLUDE_FORMATS` | *(unset)* | Formats to subtract from the include set |
 | `WAL_CACHE` | `~/.cache/wal` | Where pywal writes `colors-kitty.conf` |
 | `UNSPLASH_ACCESS_KEY` | *(unset)* | Unsplash key; Keychain is checked if unset |
 | `THEME_NO_APPLY` | *(unset)* | Any value = dry run (see below) |
@@ -226,13 +228,13 @@ must move both. `theme` refuses to write a dangling include and says so.
 
 ```sh
 THEME_NO_APPLY=1 theme random
-THEME_NO_APPLY=1 WALLPAPER_DIR=/tmp/wp theme url https://example.org/pic.jpg
+THEME_NO_APPLY=1 THEME_WALLPAPER_DIR=/tmp/wp theme url https://example.org/pic.jpg
 ```
 
 With `THEME_NO_APPLY` set, every step still runs — resolution, download,
 validation, dedupe, naming — but the three steps that touch live state are
 skipped and announced instead: setting the desktop image, running pywal, and
-rewriting `current-theme.conf`. Combine it with a throwaway `WALLPAPER_DIR` to
+rewriting `current-theme.conf`. Combine it with a throwaway `THEME_WALLPAPER_DIR` to
 test the network paths without adding files to the real library.
 
 ### Dependencies
