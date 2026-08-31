@@ -669,13 +669,13 @@ def main():
                          'and print how to drive and kill it')
     args = ap.parse_args()
 
-    # Set BEFORE anything spawns, because the reaper registered at import
-    # consults it. Retaining the process also retains RUNDIR: dropping the
-    # socket out from under a kitty we deliberately kept would leave an
-    # unreachable minimized window, which is neither of the two honest
-    # outcomes.
+    # --leave-running is an INTENT here, nothing more. Acting on it now would
+    # disarm cleanup for the whole run, so a failure or a signal partway
+    # through would get the worst of both: no teardown, and no custody
+    # message either, leaving an orphan the operator cannot even locate.
+    # Retention is committed at the successful handoff below and nowhere
+    # else, which keeps the handlers fully live until then.
     global LEAVE_RUNNING
-    LEAVE_RUNNING = args.leave_running
 
     t0 = time.time()
     lab = Lab()
@@ -710,9 +710,12 @@ def main():
     if not args.leave_running:
         lab.kill_kitty()
     else:
-        # Retained on purpose, so say what was retained and how to be rid of
-        # it. A lab nobody can reach or find is the failure mode this branch
-        # used to produce.
+        # Retention and custody are committed together, in that order and
+        # only here: the flag flips immediately before the message that tells
+        # the operator what they now own. Reaching this line means every
+        # phase completed, so nothing can be retained without being reported,
+        # and nothing that failed earlier can be retained at all.
+        LEAVE_RUNNING = True
         print('lab kitty left running (pid %s), socket kept at:'
               % (lab.proc.pid if lab.proc else '?'))
         print('  %s' % lab.sock_path)
