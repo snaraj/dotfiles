@@ -29,19 +29,30 @@ If a control ever comes back green, the harness is broken, not fixed.
 from __future__ import annotations
 
 import argparse
+import atexit
 import glob
 import json
 import os
 import random
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 LAB = os.path.dirname(os.path.abspath(__file__))
 KITTY = '/Applications/kitty.app/Contents/MacOS/kitty'
-SOCK_BASE = '/tmp/kitty-split-lab'
-STATE_FILE = '/tmp/split-lab-state.json'
+# Both the control socket and the probe drop are PER RUN, inside a private
+# 0700 directory, rather than at fixed names in a shared /tmp. Fixed names
+# would let two concurrent runs attach to each other's kitty and clobber each
+# other's state file, and on a multi-user box anyone could pre-create the
+# state path as a symlink and redirect what the probe kitten writes. The
+# directory goes away with the process.
+RUNDIR = tempfile.mkdtemp(prefix='kitty-split-lab.')
+atexit.register(shutil.rmtree, RUNDIR, True)
+SOCK_BASE = os.path.join(RUNDIR, 'sock')
+STATE_FILE = os.path.join(RUNDIR, 'state.json')
 DRIFT_TOL = 48          # I1/I2/I4 per-edge drift tolerance (px)
 OVERLAP_TOL = 4         # I3 border-width overlap tolerance (px)
 MIN_SIZE = 5            # I3 minimum window extent (px)
@@ -80,13 +91,16 @@ class Lab:
 
     # -- process lifecycle ------------------------------------------------
     def find_socket(self) -> str | None:
-        socks = sorted(glob.glob(SOCK_BASE + '-*'))
+        # --listen-on creates the path verbatim; the conf directive appends
+        # -<pid>. Match both, and the glob is confined to RUNDIR so it can
+        # only ever find sockets belonging to this run.
+        socks = sorted(glob.glob(SOCK_BASE + '*'))
         return socks[-1] if socks else None
 
     def kill_kitty(self) -> None:
         subprocess.run(['pkill', '-f', 'kitty --config ' + LAB + '/lab.conf'],
                        capture_output=True)
-        for s in glob.glob(SOCK_BASE + '-*'):
+        for s in glob.glob(SOCK_BASE + '*'):
             try:
                 os.unlink(s)
             except OSError:
@@ -102,6 +116,7 @@ class Lab:
             env = dict(os.environ, KITTY_CONFIG_DIRECTORY=LAB)
             subprocess.Popen(
                 [KITTY, '--config', os.path.join(LAB, 'lab.conf'),
+                 '--listen-on', 'unix:' + SOCK_BASE,
                  '--start-as=minimized', '--detach'],
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             for _ in range(100):
