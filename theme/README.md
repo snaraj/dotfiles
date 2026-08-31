@@ -255,6 +255,7 @@ two coexist; `theme status` will report whatever is currently included.
 | `THEME_WALLPAPER_DIR` | `$CONFIG_DIR/wallpapers` | Wallpaper library, searched recursively (subfolders included); downloads land at its root. `WALLPAPER_DIR` still honored as a fallback |
 | `THEME_FORMATS` | `jpg jpeg png webp gif bmp tif tiff` | Formats to list/set (comma or space separated; replaces the default set) |
 | `THEME_EXCLUDE_FORMATS` | *(unset)* | Formats to subtract from the include set |
+| `THEME_CONTRAST` | `4.5` | Palette contrast floor, enforced against the *effective* background (kitty opacity blended with the wallpaper's average) so text stays readable under translucency. Raise for denser text |
 | `WAL_CACHE` | `~/.cache/wal` | Where pywal writes `colors-kitty.conf` |
 | `UNSPLASH_ACCESS_KEY` | *(unset)* | Unsplash application key (Client-ID); Keychain item `unsplash-access-key` is checked if unset |
 | `UNSPLASH_USER_TOKEN` | *(unset)* | Unsplash account bearer token, written by `theme unsplash auth`; Keychain item `unsplash-user-token` is checked if unset |

@@ -18,6 +18,9 @@ UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, l
 # default; THEME_FORMATS replaces the set, THEME_EXCLUDE_FORMATS subtracts
 # (comma- or space-separated, case and leading dots ignored).
 THEME_FORMATS_ALL="jpg jpeg png webp gif bmp tif tiff"
+# Palette contrast floor. Enforced twice: as pywal's --contrast request, and
+# again by post_floor_palette against the EFFECTIVE (blended) background.
+WAL_CONTRAST="${THEME_CONTRAST:-4.5}"
 
 # EVERY message this tool prints passes through one of these two, so this is
 # where control bytes stop — not at whichever call sites someone remembered.
@@ -420,7 +423,7 @@ set_palette() {
         die "ImageMagick not installed (brew install imagemagick / apt install imagemagick) — required for the --contrast palette floor"
     # colorz refuses near-monochrome art ("not enough colors");
     # modern_colorthief (pipx inject pywal modern_colorthief) handles those.
-    # --contrast 3.0 floors accent-vs-background contrast (needs imagemagick);
+    # --contrast "$WAL_CONTRAST" floors accent-vs-background contrast (needs imagemagick);
     # dark art otherwise yields ~1.6:1 accents — invisible typed text. A 3.0
     # request lands ~4.5:1 measured while staying in the image's hue family.
     # -s -t -e: derivation + cache export ONLY. pywal's live-reload otherwise
@@ -428,15 +431,83 @@ set_palette() {
     # tty — kitty misparses them (tab title became the palette bytes) — and
     # runs its own kitty reload; reload_kitty below is the one sanctioned
     # path to a live terminal, and it touches colors only.
-    wal -i "$1" -s -t -e --backend colorz --contrast 3.0 >/dev/null 2>&1 ||
-        wal -i "$1" -s -t -e --backend modern_colorthief --contrast 3.0 >/dev/null 2>&1 ||
-        wal -i "$1" -s -t -e --contrast 3.0 >/dev/null 2>&1 ||
+    wal -i "$1" -s -t -e --backend colorz --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -i "$1" -s -t -e --backend modern_colorthief --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -i "$1" -s -t -e --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
         die "pywal failed on $1"
     [ -f "$WAL_CACHE/colors-kitty.conf" ] ||
         die "pywal wrote no kitty colors in $WAL_CACHE — point WAL_CACHE at pywal's own cache dir"
+    # wal's floor is measured against the OPAQUE palette background, but a
+    # translucent kitty draws text over that background BLENDED with the
+    # wallpaper — on light art the effective background is far lighter and
+    # mid-tone accents die (measured 1.2:1 on a pink sky at 0.60 opacity,
+    # while wal reported 3.4:1). Re-floor every text color against the
+    # effective background, hue kept, lightness moved just far enough.
+    post_floor_palette "$1" ||
+        note "palette kept as derived (effective-background floor needs imagemagick)"
     printf 'include %s/colors-kitty.conf\n' "$WAL_CACHE" >"$CURRENT" || die "cannot write $CURRENT"
     reload_kitty "$WAL_CACHE/colors-kitty.conf"
     return 0
+}
+
+# Blend-aware contrast floor: effective bg = configured kitty opacity over the
+# wallpaper's average color; every color1-15 (and foreground) that misses
+# WAL_CONTRAST against IT is mixed toward white/black — whichever side the
+# effective background is not — by binary search to the smallest sufficient
+# step. Rewrites wal's colors + colors-kitty.conf so kitty, status swatches
+# and fresh windows all agree. Opaque terminals reduce to the same floor
+# against the palette background itself.
+PALETTE_FLOOR_PY='
+import os, re
+d = os.environ["WAL_DIR"]; a = float(os.environ["OPACITY"])
+wp = os.environ["WP_AVG"]; floor = float(os.environ["FLOOR"])
+def rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i+2], 16) for i in (0, 2, 4)]
+def hexs(c): return "#%02x%02x%02x" % tuple(c)
+def lum(c):
+    def ch(x):
+        x /= 255
+        return x/12.92 if x <= 0.03928 else ((x+0.055)/1.055)**2.4
+    r, g, b = c
+    return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b)
+def ratio(c1, c2):
+    l1, l2 = sorted((lum(c1), lum(c2)), reverse=True)
+    return (l1+0.05) / (l2+0.05)
+cols = [l.strip() for l in open(d + "/colors")][:16]
+bg = rgb(cols[0]); w = rgb(wp)
+eff = [round(a*b + (1-a)*x) for b, x in zip(bg, w)]
+target = [255]*3 if lum(eff) < 0.5 else [0]*3
+def floored(h):
+    c = rgb(h)
+    if ratio(c, eff) >= floor: return h
+    lo, hi = 0.0, 1.0
+    for _ in range(24):
+        m = (lo+hi) / 2
+        cand = [round(cc + (t-cc)*m) for cc, t in zip(c, target)]
+        if ratio(cand, eff) >= floor: hi = m
+        else: lo = m
+    return hexs([round(cc + (t-cc)*hi) for cc, t in zip(c, target)])
+new = [cols[0]] + [floored(c) for c in cols[1:16]]
+open(d + "/colors", "w").write("\n".join(new) + "\n")
+k = open(d + "/colors-kitty.conf").read()
+k = re.sub(r"^(color(\d+)) +#[0-9a-fA-F]{6}",
+    lambda m: m.group(1) + " " + new[int(m.group(2))] if int(m.group(2)) < 16 else m.group(0),
+    k, flags=re.M)
+k = re.sub(r"^(foreground +)(#[0-9a-fA-F]{6})",
+    lambda m: m.group(1) + floored(m.group(2)), k, flags=re.M)
+open(d + "/colors-kitty.conf", "w").write(k)
+'
+post_floor_palette() { # $1 wallpaper
+    local op avg
+    command -v magick >/dev/null 2>&1 || return 1
+    op=$(awk '/^background_opacity[ \t]/{v=$2} END{print (v=="") ? 1 : v}' "$KITTY_DIR/kitty.conf" 2>/dev/null)
+    case "$op" in '' | *[!0-9.]*) op=1 ;; esac
+    avg=$(magick "$1" -resize '1x1!' -depth 8 txt:- 2>/dev/null |
+        sed -n 's/.*#\([0-9A-Fa-f]\{6\}\).*/\1/p' | head -1)
+    [ -n "$avg" ] || return 1
+    WAL_DIR="$WAL_CACHE" OPACITY="$op" WP_AVG="$avg" FLOOR="$WAL_CONTRAST" \
+        python3 -c "$PALETTE_FLOOR_PY" 2>/dev/null
 }
 
 use_image() {
@@ -451,9 +522,9 @@ use_image() {
 # desktop) and no CURRENT write / kitty reload.
 derive_scheme() { # $1 file
     command -v wal >/dev/null 2>&1 || return 1
-    wal -n -i "$1" -s -t -e --backend colorz --contrast 3.0 >/dev/null 2>&1 ||
-        wal -n -i "$1" -s -t -e --backend modern_colorthief --contrast 3.0 >/dev/null 2>&1 ||
-        wal -n -i "$1" -s -t -e --contrast 3.0 >/dev/null 2>&1
+    wal -n -i "$1" -s -t -e --backend colorz --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -n -i "$1" -s -t -e --backend modern_colorthief --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -n -i "$1" -s -t -e --contrast "$WAL_CONTRAST" >/dev/null 2>&1
 }
 
 # Wallpapers named on STDIN get a scheme, not just the ones already applied:
@@ -1309,6 +1380,7 @@ cmd_status() {
     fi
     printf '  THEME_WALLPAPER_DIR   %s\n' "$(display_text "$WALLPAPER_DIR")"
     printf '  THEME_FORMATS         %s\n' "$(display_text "${THEME_FORMATS:-$THEME_FORMATS_ALL} ${THEME_EXCLUDE_FORMATS:+(minus: $THEME_EXCLUDE_FORMATS)}")"
+    printf '  THEME_CONTRAST        %s\n' "$(display_text "$WAL_CONTRAST")"
     printf '  WAL_CACHE             %s\n' "$(display_text "$WAL_CACHE")"
 }
 
@@ -1680,6 +1752,12 @@ EOF
 # display_text, which (like every helper) is only guaranteed defined once the
 # whole file has been read.
 build_img_glob
+
+# Same late validation as the format set: a non-numeric floor would reach both
+# pywal and the blend pass as a number, so it is refused here, once.
+case "$WAL_CONTRAST" in
+'' | *[!0-9.]* | . | *.*.*) die "THEME_CONTRAST must be a number (got: $WAL_CONTRAST)" ;;
+esac
 
 
 # --rotate left|right turns the image 90° before it is saved and applied, so a
