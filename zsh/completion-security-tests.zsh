@@ -352,6 +352,68 @@ check "a cache dir holding a non-completion entry is kept off fpath" \
       "$([[ $out == *"FPATH0=$s/zd/completions"* ]] && print ON-FPATH || print excluded)" "excluded"
 rm -rf $s
 
+# --- 16c. Entry-level validation and inherited-cache purging -----------------
+
+# (i) an existing 0666 _kubectl inside an otherwise accepted 0755 directory.
+# The directory is traversable, so the file is attacker-writable through it.
+s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 755 $s/zd/completions
+print -r -- '#compdef kubectl' > $s/zd/completions/_kubectl
+print -r -- 'print ATTACKER-COMPLETION-RAN' >> $s/zd/completions/_kubectl
+chmod 0666 $s/zd/completions/_kubectl
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1; autoload -Uz _kubectl 2>/dev/null; _kubectl 2>/dev/null" </dev/null 2>&1 )
+check "a world-writable _kubectl is neither accepted nor loadable" \
+      "$([[ $out == *ATTACKER-COMPLETION-RAN* ]] && print RAN || print blocked)" "blocked"
+check "and a world-writable completion arms no stamp" \
+      "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "absent"
+rm -rf $s
+
+# (ii) generation under a permissive umask must still land a safe mode
+if (( $+commands[kubectl] || $+commands[helm] )); then
+    s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 755 $s/zd/completions
+    zsh -f -c "umask 000; ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
+    typeset -i _bad=0 _seen=0
+    for _f in $s/zd/completions/_*(N); do
+        typeset -A _m; zstat -H _m -L -- $_f 2>/dev/null || continue
+        (( _seen++ )); (( (_m[mode] & 8#22) == 0 )) || _bad=1
+    done
+    check "generation under umask 000 produced at least one completion" \
+          "$(( _seen > 0 ))" "1"
+    check "generated completions are never group/world-writable" "$_bad" "0"
+    unset _f _m _bad _seen
+    rm -rf $s
+else
+    print "SKIP  umask generation case (neither kubectl nor helm installed)"
+fi
+
+# (iii) the cache is ALREADY on fpath (as an exported FPATH delivers it) and the
+# gate then rejects it: the inherited occurrence must be purged, not merely
+# "not re-added", and nothing from it may be registered or loadable.
+s=$(mktemp -d); mkdir -p $s/zd/completions
+print -r -- '#compdef kubectl' > $s/zd/completions/_kubectl
+print -r -- 'print ATTACKER-COMPLETION-RAN' >> $s/zd/completions/_kubectl
+chmod 0666 $s/zd/completions/_kubectl
+# fpath is pinned to the cache plus zsh's own function dir only, so an
+# ambient/system _kubectl cannot mask what is being measured here.
+_sysfns=(${(M)fpath:#*/zsh/*/functions})
+out=$( zsh -f -c "
+ZDOTDIR=$s/zd
+fpath=($s/zd/completions ${_sysfns[1]:-/usr/share/zsh/5.9/functions})
+source $SRC 2>&1
+n=0; for d in \$fpath; do [[ \$d == $s/zd/completions ]] && (( n++ )); done
+print CACHE_COUNT=\$n
+print COMPS=\${+_comps[kubectl]}
+print RESOLVED=\${\${:-\$(for d in \$fpath; do [[ -e \$d/_kubectl ]] && print \$d; done)}:-none}
+autoload -Uz _kubectl 2>/dev/null; _kubectl 2>/dev/null" </dev/null 2>&1 )
+check "an inherited cache occurrence is purged from fpath when the gate rejects it" \
+      "$([[ $out == *CACHE_COUNT=0* ]] && print 0 || print nonzero)" "0"
+check "no completion from a rejected inherited cache is registered" \
+      "$([[ $out == *COMPS=0* ]] && print unregistered || print registered)" "unregistered"
+check "and _kubectl resolves from nowhere once the cache is purged" \
+      "$([[ $out == *RESOLVED=none* ]] && print none || print "$out[(ws:RESOLVED=:)2]")" "none"
+check "no completion from a rejected inherited cache is loadable" \
+      "$([[ $out == *ATTACKER-COMPLETION-RAN* ]] && print RAN || print blocked)" "blocked"
+rm -rf $s
+
 # --- 17. DIFFERENTIAL: the old glob idiom must not come back -----------------
 old_always_true=$(zsh -f -c '
     d=$(mktemp -d); rm -f $d/.zcompdump

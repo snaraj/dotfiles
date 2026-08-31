@@ -38,6 +38,15 @@ _zc_pin_auditors() {
     autoload -Uz +X compinit compaudit
     fpath=($saved)
 }
+
+# Canonicalize fpath ONCE, permanently, before anything is resolved from it:
+# every occurrence of the cache directory is dropped, whether inherited through
+# the exported FPATH or left behind by an earlier source in this shell. Stripping
+# only inside _zc_pin_auditors was not enough — it restores the array, so an
+# INHERITED occurrence survived, and declining to add another one later did not
+# remove it. The directory is re-added exactly once, below, and only after every
+# gate has passed.
+fpath=(${fpath:#$_zc_dir})
 _zc_pin_auditors
 
 # Trusted = exists, is NOT a symlink, is owned by us, and is not writable by
@@ -74,9 +83,14 @@ _zc_bad=
 _zc_dir_clean() {
     local f
     for f in $_zc_dir/*(N); do
-        [[ ${f:t} == _* ]] && continue
-        _zc_bad=${f:t}
-        return 1
+        # the name must be a completion name, AND the file itself must be a
+        # regular, non-symlink, owner-controlled, non-group/world-writable file.
+        # A correctly-permissioned directory is traversable, so a 0666 _kubectl
+        # inside it is still attacker-writable and gets autoloaded on use.
+        if [[ ${f:t} != _* ]] || [[ ! -f $f ]] || ! _zc_trusted $f; then
+            _zc_bad=${f:t}
+            return 1
+        fi
     done
     return 0
 }
@@ -86,7 +100,7 @@ _zc_dir_ok=0
 if ! _zc_trusted $_zc_dir; then
     print -u2 "zsh: ignoring ${_zc_dir} — not owned by you, or writable by others. Fix: chmod go-w ${_zc_dir}"
 elif ! _zc_dir_clean; then
-    print -u2 "zsh: ignoring ${_zc_dir} — it holds a non-completion entry (${_zc_bad}) that could shadow the completion system. Fix: rm ${_zc_dir}/${_zc_bad}"
+    print -u2 "zsh: ignoring ${_zc_dir} — entry ${_zc_bad} is not a safe completion file (wrong name, not a regular file, or writable by others). Fix: inspect ${_zc_dir}/${_zc_bad}"
 else
     _zc_dir_ok=1
 fi
@@ -103,7 +117,12 @@ if (( _zc_dir_ok )); then
         if [[ ! -f $_zc_f || -h $_zc_f ]] || [[ ${commands[$_t]} -nt $_zc_f ]]; then
             _zc_tmp=$_zc_dir/._$_t.$$
             rm -f -- $_zc_tmp
-            if $_t completion zsh >| $_zc_tmp 2>/dev/null; then
+            # explicit mode: under a permissive umask the redirect would
+            # otherwise create a world-writable completion, which the gate above
+            # would then (correctly) reject on the next startup. No `--` here:
+            # BSD/macOS chmod treats it as a filename, and the failure would
+            # short-circuit generation entirely.
+            if $_t completion zsh >| $_zc_tmp 2>/dev/null && chmod 644 $_zc_tmp; then
                 mv -f -- $_zc_tmp $_zc_f
             else
                 rm -f -- $_zc_tmp
