@@ -16,6 +16,13 @@ source $ZDOTDIR/completion-init.zsh
 
 # Auto Suggestions — type to see the inline history suggestion; RIGHT ARROW
 # accepts it, UP/DOWN substring-search history for what you typed (below).
+# Accepting is DELIBERATE and single-keyed: plain right arrow only. The
+# plugin's defaults also let End swallow the whole suggestion and let
+# option/ctrl+right (forward-word) pull it in word by word — navigation
+# keys silently becoming input, which surfaced as truncated garbage
+# commands. Set-before-source wins over the plugin's defaults.
+ZSH_AUTOSUGGEST_ACCEPT_WIDGETS=(forward-char vi-forward-char)
+ZSH_AUTOSUGGEST_PARTIAL_ACCEPT_WIDGETS=()
 source $ZDOTDIR/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # pipx-installed tools (pywal) and the theme command
