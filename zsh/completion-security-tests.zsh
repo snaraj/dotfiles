@@ -623,29 +623,48 @@ rm -rf $s
 # (ii-j) the publication temporary must be owner-only AT CREATION.
 # create-then-chmod published a 0666 file for a window under a permissive
 # ambient umask; a process that opened it there keeps a WRITABLE DESCRIPTOR
-# that no later chmod, rename, or revalidation can revoke — enough to keep
-# refreshing a valid receipt so the daily compaudit never runs again.
-s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 755 $s/zd $s/zd/completions
-cat > $s/poll.zsh <<POLLEOF
+# that no later chmod, rename, or revalidation can revoke.
+#
+# Observing a transient file is inherently racy, so this harness is built so a
+# MISSED observation is a FAILURE, never a pass: it retries, and reports the
+# literal string "absent" when it never saw the file. Mapping missing evidence
+# to the secure value (the earlier `${_seen:-600}`) let the very defect this
+# case exists for slip through whenever the scheduler lost the race.
+observe_temp_mode() {   # $1 sandbox; echoes the observed mode, or "absent"
+    local dir=$1 i
+    for i in {1..12}; do
+        rm -f $dir/observed $dir/zd/$STAMP 2>/dev/null
+        cat > $dir/poll.zsh <<POLLEOF
 zmodload -F zsh/stat b:zstat
 typeset -A st
-for i in {1..400000}; do
-  for f in $s/zd/.zcompaudit-clean.tmp.*(N); do
-    zstat -H st -L -- \$f 2>/dev/null && { printf '%o\n' \$(( st[mode] & 8#777 )) > $s/observed; exit 0 }
+[[ -n \${SUPPRESS_OBSERVATION:-} ]] && exit 0
+for n in {1..400000}; do
+  for f in $dir/zd/.zcompaudit-clean.tmp.*(N); do
+    zstat -H st -L -- \$f 2>/dev/null && { printf '%o\n' \$(( st[mode] & 8#777 )) > $dir/observed; exit 0 }
   done
 done
 POLLEOF
-zsh -f $s/poll.zsh &
-_poll=$!
-sleep 0.05
-zsh -f -c "umask 000; ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
-wait $_poll 2>/dev/null
-_seen=$(cat $s/observed 2>/dev/null)
+        zsh -f $dir/poll.zsh &
+        local poll=$!
+        sleep 0.03
+        zsh -f -c "umask 000; ZDOTDIR=$dir/zd; source $SRC" </dev/null >/dev/null 2>&1
+        wait $poll 2>/dev/null
+        [[ -s $dir/observed ]] && { print -r -- "$(<$dir/observed)"; return 0 }
+        [[ -n ${SUPPRESS_OBSERVATION:-} ]] && break
+    done
+    print -r -- absent
+}
+
+s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 755 $s/zd $s/zd/completions
 check "the publication temporary is never group/world-accessible at creation" \
-      "${_seen:-600}" "600"
+      "$(observe_temp_mode $s)" "600"
 check "and the published stamp is owner-only" \
       "$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/zd/$STAMP 2>/dev/null && print \$(( (st[mode] & 8#77) == 0 )) || print no")" "1"
-unset _poll _seen
+
+# ...and the harness itself must fail loudly when it observes nothing. Without
+# this, a scheduler miss would silently certify the property.
+check "a suppressed observation reports 'absent', never the secure value" \
+      "$(SUPPRESS_OBSERVATION=1 observe_temp_mode $s)" "absent"
 rm -rf $s
 
 # (ii-k) publishing must not leak the caller's umask back out.
