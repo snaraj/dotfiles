@@ -488,11 +488,18 @@ if not name:
 # cannot occur in these strings (stripped below), so each field stays put.
 name = name.replace("\x00", "")
 who = ((best.get("user") or {}).get("name") or "").replace("\x00", "")
+# The API carries no premium boolean — the signal is the image HOST:
+# Unsplash+ files are served from plus.unsplash.com (exact hostname, not a
+# substring: evilplus.unsplash.com.example must not qualify).
+from urllib.parse import urlparse
+img = u.get("raw") or u.get("full", "")
+premium = 1 if urlparse(img).hostname == "plus.unsplash.com" else 0
 for field in (
-    u.get("raw") or u.get("full", ""), best.get("width", 0), best.get("height", 0),
+    img, best.get("width", 0), best.get("height", 0),
     name,
     (best.get("links") or {}).get("download_location", ""),
-    who):
+    who,
+    premium):
     sys.stdout.write(str(field) + "\x00")
 '
 
@@ -500,6 +507,60 @@ unsplash_key() {
     [ -n "${UNSPLASH_ACCESS_KEY:-}" ] && { printf '%s' "$UNSPLASH_ACCESS_KEY"; return 0; }
     command -v security >/dev/null 2>&1 &&
         security find-generic-password -s unsplash-access-key -w 2>/dev/null
+}
+
+# The application Client-ID authenticates the APP, so Unsplash+ photos come
+# back WATERMARKED. Entitlement is account-based: a one-time OAuth exchange
+# (theme unsplash auth) stores the owner-account bearer token in the
+# Keychain, and every API call then runs as the subscriber — premium files
+# arrive clean, exactly like the website's Download button.
+unsplash_user_token() {
+    [ -n "${UNSPLASH_USER_TOKEN:-}" ] && { printf '%s' "$UNSPLASH_USER_TOKEN"; return 0; }
+    command -v security >/dev/null 2>&1 &&
+        security find-generic-password -s unsplash-user-token -w 2>/dev/null
+}
+
+# ONE curl -K config line carrying the strongest available credential —
+# stdin config, never argv, so neither token nor key ever reaches `ps`.
+unsplash_auth_line() {
+    local tok
+    tok=$(unsplash_user_token)
+    if [ -n "$tok" ]; then printf 'header = "Authorization: Bearer %s"\n' "$tok"
+    else printf 'header = "Authorization: Client-ID %s"\n' "$(unsplash_key)"
+    fi
+}
+
+# One-time account link: OAuth authorization-code exchange with the out-of-
+# band redirect (the code shows in the browser; the user pastes it here).
+# Needs the app's SECRET key once, from the same dashboard page as the
+# access key. Secret, code and token all travel via stdin (curl -K data
+# lines / `security -i`), never argv; code and token are charset-checked
+# before they may sit in URL/command position.
+cmd_unsplash_auth() {
+    local key secret authurl code json tok
+    key=$(unsplash_key)
+    [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    secret="${UNSPLASH_SECRET_KEY:-}"
+    [ -n "$secret" ] || secret=$(command -v security >/dev/null 2>&1 &&
+        security find-generic-password -s unsplash-secret-key -w 2>/dev/null)
+    [ -n "$secret" ] || die "the exchange needs your app's SECRET key (shown beside the access key at https://unsplash.com/oauth/applications): export UNSPLASH_SECRET_KEY, or store it once with \`security add-generic-password -s unsplash-secret-key -a \"\$USER\" -w\`"
+    authurl="https://unsplash.com/oauth/authorize?client_id=$key&redirect_uri=urn:ietf:wg:oauth:2.0:oob&response_type=code&scope=public"
+    note "opening the authorize page — sign in as your Unsplash+ account and approve"
+    if command -v open >/dev/null 2>&1; then open "$authurl"; else note "open: $authurl"; fi
+    printf 'paste the code shown after approving: '
+    IFS= read -r code
+    case "$code" in '' | *[!A-Za-z0-9_-]*) die "that does not look like an authorization code (letters, digits, - and _ only)" ;; esac
+    json=$(printf 'data = "client_id=%s"\ndata = "client_secret=%s"\ndata = "redirect_uri=urn:ietf:wg:oauth:2.0:oob"\ndata = "code=%s"\ndata = "grant_type=authorization_code"\n' "$key" "$secret" "$code" |
+        curl -fsg --max-time 30 -K - "https://unsplash.com/oauth/token") ||
+        die "token exchange failed — wrong/expired code, or the app's redirect URIs do not include urn:ietf:wg:oauth:2.0:oob (add it on the dashboard)"
+    tok=$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+    [ -n "$tok" ] || die "Unsplash answered without an access token"
+    case "$tok" in *[!A-Za-z0-9._~+/=-]*) die "unexpected token shape — refusing to store it" ;; esac
+    command -v security >/dev/null 2>&1 || die "no macOS Keychain (security) available to store the token"
+    printf 'add-generic-password -U -a %s -s unsplash-user-token -w %s\n' "$USER" "$tok" | security -i >/dev/null 2>&1 ||
+        die "could not store the token in the Keychain"
+    note "linked — Unsplash+ downloads are now watermark-free (Keychain: unsplash-user-token)"
+    return 0
 }
 
 cmd_unsplash() {
@@ -537,16 +598,22 @@ cmd_unsplash() {
     # spaces, so & or [] in a search stays search text.
     local curl_args=(-fsLg --max-time 30 -K -)
     [ -n "$query" ] && curl_args+=(-G --data-urlencode "query=$query")
-    json=$(printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+    json=$(unsplash_auth_line |
         curl "${curl_args[@]}" "$url") || die "Unsplash request failed (bad key, rate limit, or no network)"
     # Read the six NUL-terminated fields into an array (a tab/newline in the
     # contributor-controlled name or photographer can no longer shift a later
     # field). read -d '' captures each up to its NUL; the final read hits EOF.
     local _f _fields=()
     while IFS= read -r -d '' _f; do _fields+=("$_f"); done < <(printf '%s' "$json" | python3 -c "$UNSPLASH_PY")
-    [ "${#_fields[@]}" -ge 6 ] || die "Unsplash returned no usable photo"
+    [ "${#_fields[@]}" -ge 7 ] || die "Unsplash returned no usable photo"
     img_url=${_fields[0]}; w=${_fields[1]}; h=${_fields[2]}
     slug=${_fields[3]}; dl=${_fields[4]}; who=${_fields[5]}
+    # Unsplash+ content downloaded over the application key is WATERMARKED —
+    # say so BEFORE spending the download, and name the one-time fix.
+    if [ "${_fields[6]:-0}" = 1 ] && [ -z "$(unsplash_user_token)" ]; then
+        note "Unsplash+ photo over application-key auth: the file WILL carry the watermark"
+        note "one-time fix: theme unsplash auth (links your Unsplash+ account, clean files after)"
+    fi
     # The download-report call attaches the Access Key, so its target must be
     # an api.unsplash.com HTTPS URL and nothing else — defence in depth beside
     # the NUL transport: even a malicious download_location cannot redirect the
@@ -572,7 +639,7 @@ cmd_unsplash() {
     # Unsplash API guideline: report the download so the photographer is
     # credited. $dl is validated to api.unsplash.com above; --url draws an
     # explicit boundary so it can never be read as another curl option.
-    [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+    [ -n "$dl" ] && unsplash_auth_line |
         curl -fsg --max-time 15 -K - -o /dev/null --url "$dl" 2>/dev/null
     [ -n "$who" ] && note "photo by $who on Unsplash"
     use_image "$SAVED"
@@ -588,7 +655,7 @@ cmd_unsplash_status() {
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
     scratch_new
-    printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+    unsplash_auth_line |
         curl -fsg --max-time 15 -K - -D "$SCRATCH" -o /dev/null \
             "https://api.unsplash.com/photos?page=1&per_page=1" ||
         die "Unsplash request failed (bad key, rate limit exhausted, or no network)"
@@ -611,8 +678,12 @@ cmd_unsplash_status() {
     else
         printf 'key:                      set (Keychain: unsplash-access-key)\n'
     fi
-    printf 'account:                  application access key (Client-ID) — usage counts\n'
-    printf '                          per app; no user is logged in over this key\n'
+    if [ -n "$(unsplash_user_token)" ]; then
+        printf 'account:                  user token linked (Bearer) — Unsplash+ files come clean\n'
+    else
+        printf 'account:                  application access key (Client-ID); no user is logged\n'
+        printf '                          in, so Unsplash+ photos arrive WATERMARKED — see: theme unsplash auth\n'
+    fi
     printf 'note:                     this check spent 1 request of the window above\n'
     return 0
 }
@@ -1208,14 +1279,17 @@ theme random [--rotate left|right] [--extend[=RRGGBB]]
 EOF
         ;;
     set) cat <<EOF
-theme set <image> [--rotate left|right] [--extend[=RRGGBB]]
+theme set <image | url> [--rotate left|right] [--extend[=RRGGBB]]
 
-  Apply a specific local wallpaper: desktop + palette + kitty.
-  <image> is a path or a name under $wdir (extension optional).
+  Apply a specific wallpaper: desktop + palette + kitty. <image> is a
+  path or a name under $wdir (extension optional). set also
+  understands actionable links: an unsplash.com/photos/… page routes
+  through 'theme unsplash', any other URL through 'theme url'.
 
   Examples:
     theme set spain-city-mountains
     theme set nebulosa-red.png --extend
+    theme set https://unsplash.com/photos/a-computer-screen-with-a-wave-on-it-mOpfECCgeC4
 EOF
         ;;
     unsplash) cat <<EOF
@@ -1231,14 +1305,21 @@ theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
   searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
   Keychain item (see README.md).
 
+  theme unsplash auth links your Unsplash ACCOUNT once (OAuth): after
+  that, Unsplash+ photos download watermark-free, exactly like the
+  website's Download button. Without it they arrive WATERMARKED (the
+  application key has no subscription). Needs the app's secret key once
+  (env UNSPLASH_SECRET_KEY or Keychain 'unsplash-secret-key').
+
   theme unsplash status shows the API window for your key — requests
-  left this hour, tier, key source. The check itself costs 1 request.
+  left this hour, tier, key source, linked account. Costs 1 request.
 
   Examples:
     theme unsplash                     # surprise me
     theme unsplash neon city rain
     theme unsplash mountain lake sunrise --rotate right
     theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
+    theme unsplash auth                # one-time: watermark-free Unsplash+
     theme unsplash status              # 39/50 requests remaining this hour
 EOF
         ;;
@@ -1402,10 +1483,23 @@ fi
 
 case "${1:-help}" in
 random) cmd_local "" ;;
-set) [ -n "${2:-}" ] || die "usage: theme set <image>"; cmd_local "$2" ;;
+set)
+    # set is generic over SOURCES: an Unsplash photo page routes through the
+    # unsplash path (API metadata, credit, clean Unsplash+ files once
+    # linked), any other URL through the url path, anything else is a
+    # library name. Same validation as calling those commands directly.
+    [ -n "${2:-}" ] || die "usage: theme set <image | url>"
+    case "$2" in
+    https://unsplash.com/photos/?* | https://www.unsplash.com/photos/?*) cmd_unsplash "$2" ;;
+    *://*) cmd_url "$2" ;;
+    *) cmd_local "$2" ;;
+    esac
+    ;;
 unsplash)
     shift
-    if [ "${1:-}" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status; else cmd_unsplash "$*"; fi
+    if [ "${1:-}" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status
+    elif [ "${1:-}" = auth ] && [ $# -eq 1 ]; then cmd_unsplash_auth
+    else cmd_unsplash "$*"; fi
     ;;
 url) cmd_url "${2:-}" ;;
 list) cmd_list ;;

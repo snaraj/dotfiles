@@ -29,6 +29,7 @@ theme set <image>        # specific local image -> desktop + pywal colors
 theme unsplash           # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
+theme unsplash auth      # one-time account link: Unsplash+ w/o watermark
 theme unsplash status    # API window: requests left this hour, tier, key
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
 theme … --rotate left|right   # any image command: turn 90° before applying
@@ -154,10 +155,45 @@ security add-generic-password -s unsplash-access-key -a "$USER" -w
 With no key anywhere, `theme unsplash` fails with a one-line instruction and
 does nothing else. It never silently falls back to another photo service.
 
+#### Unsplash+ without the watermark (`theme unsplash auth`)
+
+The access key authenticates the **application**, and an Unsplash+ entitlement
+belongs to an **account** — so premium photos fetched over the application key
+come back watermarked, no matter which key you hold. `theme` says so before it
+spends the download (the signal is the image host, exactly
+`plus.unsplash.com`), and names the fix.
+
+`theme unsplash auth` performs the one-time OAuth authorization-code exchange
+that links your account. It needs your application's **secret** key once —
+shown beside the access key on the same dashboard page — and it stores the
+resulting bearer token in the Keychain. After that every API call runs as the
+subscriber and premium files arrive clean, exactly like the website's Download
+button.
+
+```sh
+# the secret, once, for the exchange only (env or Keychain — same as the key)
+security add-generic-password -s unsplash-secret-key -a "$USER" -w
+
+theme unsplash auth      # opens the authorize page, then paste the code shown
+theme unsplash status    # reports whether an account is linked
+```
+
+Your Unsplash app must list `urn:ietf:wg:oauth:2.0:oob` in its redirect URIs
+for the exchange to succeed; the error message says so if it does not. Neither
+the secret nor the token is ever written into this repository — the token
+lands in the Keychain item `unsplash-user-token`, and none of the three
+credentials ever appears on a command line (see the implementation notes
+below).
+
 Implementation notes worth knowing:
 
-- The key is handed to `curl` through a **stdin config file**, not on the
-  command line, so it never appears in `ps` output for other users.
+- Every credential — access key, account token, and the secret used by
+  `theme unsplash auth` — is handed to `curl` through a **stdin config file**
+  (`-K -`), never on the command line, so none of them appears in `ps` output
+  for other users. The token is likewise stored by piping the command into
+  `security -i` rather than passing it as an argument. The only credential
+  that reaches a command line is the `client_id` in the authorize URL, which
+  is public by construction: the browser displays it.
 - The command asks for 5 random landscape candidates in a single request and
   keeps the widest one that is at least 3840px; if none reach that, it takes
   the widest available and tells you the size it settled for.
@@ -217,7 +253,9 @@ two coexist; `theme status` will report whatever is currently included.
 | `THEME_FORMATS` | `jpg jpeg png webp gif bmp tif tiff` | Formats to list/set (comma or space separated; replaces the default set) |
 | `THEME_EXCLUDE_FORMATS` | *(unset)* | Formats to subtract from the include set |
 | `WAL_CACHE` | `~/.cache/wal` | Where pywal writes `colors-kitty.conf` |
-| `UNSPLASH_ACCESS_KEY` | *(unset)* | Unsplash key; Keychain is checked if unset |
+| `UNSPLASH_ACCESS_KEY` | *(unset)* | Unsplash application key (Client-ID); Keychain item `unsplash-access-key` is checked if unset |
+| `UNSPLASH_USER_TOKEN` | *(unset)* | Unsplash account bearer token, written by `theme unsplash auth`; Keychain item `unsplash-user-token` is checked if unset |
+| `UNSPLASH_SECRET_KEY` | *(unset)* | Unsplash application **secret**, needed only by `theme unsplash auth`; Keychain item `unsplash-secret-key` is checked if unset |
 | `THEME_NO_APPLY` | *(unset)* | Any value = dry run (see below) |
 
 `WAL_CACHE` only tells `theme` where to *point the include*. pywal itself
