@@ -30,10 +30,42 @@ _zc_token='zcompaudit-clean v1'
 # arbitrary shell-startup code execution under exactly the capability this file
 # exists to contain. +X forces the definitions to be read now; a deferred
 # `autoload` would still resolve later.
+# Compare fpath entries by FILESYSTEM IDENTITY, not spelling. `${d:A}` makes an
+# entry absolute and resolves symlinks, so a trailing slash, a `/.`, a symlinked
+# alias or a duplicate all collapse to the same string — a raw `:#$_zc_dir`
+# filter let `<cache>/` through and the auditor was pinned from it.
+_zc_dir_phys=${_zc_dir:A}
+_zc_strip_cache() {
+    local -a keep
+    local d
+    for d in $fpath; do
+        [[ ${d:A} == $_zc_dir_phys ]] && continue
+        keep+=($d)
+    done
+    fpath=($keep)
+}
+
+# macOS ACLs grant write to another principal while the POSIX mode still reads
+# 0600 and zstat still reports us as the owner, and there is no zstat for ACLs.
+# `ls -lde` prints a numbered ACE line for every entry of an extended ACL. This
+# cache has no legitimate use for one, so ANY ACL fails closed — as does an
+# unreadable path. Note the `@` in `ls -l` means extended ATTRIBUTES, not an
+# ACL, so the mode-string marker is NOT a sufficient test.
+_zc_no_acl() {
+    (( $# )) || return 0
+    local out line t
+    out=$(/bin/ls -lde -- "$@" 2>/dev/null) || return 1
+    for line in ${(f)out}; do
+        t=${line//[[:space:]]/}
+        [[ $t == <->:* ]] && return 1
+    done
+    return 0
+}
+
 _zc_pin_auditors() {
     local -a saved
     saved=($fpath)
-    fpath=(${fpath:#$_zc_dir})
+    _zc_strip_cache
     unfunction compinit compaudit 2>/dev/null
     autoload -Uz +X compinit compaudit
     fpath=($saved)
@@ -45,8 +77,9 @@ _zc_pin_auditors() {
 # only inside _zc_pin_auditors was not enough — it restores the array, so an
 # INHERITED occurrence survived, and declining to add another one later did not
 # remove it. The directory is re-added exactly once, below, and only after every
-# gate has passed.
-fpath=(${fpath:#$_zc_dir})
+# gate has passed. Entries are matched by resolved physical path, so alternate
+# spellings of the same directory are removed too.
+_zc_strip_cache
 _zc_pin_auditors
 
 # Trusted = exists, is NOT a symlink, is owned by us, and is not writable by
@@ -79,19 +112,26 @@ _zc_stamp_ok() {
 # machinery once the directory is on fpath. Its presence disqualifies the
 # directory outright, which also covers a world-writable FILE inside an
 # otherwise correctly-permissioned directory.
-_zc_bad=
+_zc_why=
 _zc_dir_clean() {
     local f
+    local -a entries
     for f in $_zc_dir/*(N); do
         # the name must be a completion name, AND the file itself must be a
         # regular, non-symlink, owner-controlled, non-group/world-writable file.
         # A correctly-permissioned directory is traversable, so a 0666 _kubectl
         # inside it is still attacker-writable and gets autoloaded on use.
         if [[ ${f:t} != _* ]] || [[ ! -f $f ]] || ! _zc_trusted $f; then
-            _zc_bad=${f:t}
+            _zc_why="entry ${f:t} is not a safe completion file (wrong name, not a regular file, or writable by others). Inspect: ${_zc_dir}/${f:t}"
             return 1
         fi
+        entries+=($f)
     done
+    # one batched ACL check for the directory and everything it holds
+    if ! _zc_no_acl $_zc_dir $entries; then
+        _zc_why="it (or an entry in it) carries an extended ACL, which can grant write access that the mode bits do not show. Inspect: ls -lde ${_zc_dir} ${_zc_dir}/*"
+        return 1
+    fi
     return 0
 }
 
@@ -100,7 +140,7 @@ _zc_dir_ok=0
 if ! _zc_trusted $_zc_dir; then
     print -u2 "zsh: ignoring ${_zc_dir} — not owned by you, or writable by others. Fix: chmod go-w ${_zc_dir}"
 elif ! _zc_dir_clean; then
-    print -u2 "zsh: ignoring ${_zc_dir} — entry ${_zc_bad} is not a safe completion file (wrong name, not a regular file, or writable by others). Fix: inspect ${_zc_dir}/${_zc_bad}"
+    print -u2 "zsh: ignoring ${_zc_dir} — ${_zc_why}"
 else
     _zc_dir_ok=1
 fi
@@ -148,7 +188,8 @@ if (( _zc_dir_ok )) && _zc_stamp_ok; then
     _zc_age=$(( EPOCHSECONDS - _zc_st[mtime] ))
 fi
 
-if (( _zc_age >= 0 && _zc_age < 86400 )) && _zc_trusted $_zc_dump; then
+if (( _zc_age >= 0 && _zc_age < 86400 )) && _zc_trusted $_zc_dump &&
+   _zc_no_acl $_zc_dump $_zc_stamp; then
     compinit -C -d $_zc_dump
 else
     compinit -d $_zc_dump
@@ -174,7 +215,7 @@ fi
 # directory now sitting on fpath.
 _zc_pin_auditors
 
-unset _t _zc_dir _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_dir_ok _zc_bad
-unfunction _zc_trusted _zc_stamp_ok _zc_dir_clean _zc_pin_auditors
+unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_dir_ok _zc_why
+unfunction _zc_trusted _zc_stamp_ok _zc_dir_clean _zc_pin_auditors _zc_strip_cache _zc_no_acl
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'

@@ -414,6 +414,78 @@ check "no completion from a rejected inherited cache is loadable" \
       "$([[ $out == *ATTACKER-COMPLETION-RAN* ]] && print RAN || print blocked)" "blocked"
 rm -rf $s
 
+# --- 16d. macOS ACL grants, and fpath aliases by physical identity -----------
+
+# (i) an ACL-writable completion whose POSIX mode still reads 0600.
+# `chmod +a` is macOS-only, so the ACL cases skip elsewhere.
+if [[ $OSTYPE == darwin* ]]; then
+    s=$(mktemp -d); mkdir -p $s/zd/completions
+    print -r -- '#compdef kubectl' > $s/zd/completions/_kubectl
+    print -r -- 'print ACL-COMPLETION-RAN' >> $s/zd/completions/_kubectl
+    chmod 600 $s/zd/completions/_kubectl
+    chmod +a 'everyone allow write' $s/zd/completions/_kubectl 2>/dev/null
+    out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1; autoload -Uz _kubectl 2>/dev/null; _kubectl 2>/dev/null" </dev/null 2>&1 )
+    check "an ACL-writable completion (mode still 0600) is not loadable" \
+          "$([[ $out == *ACL-COMPLETION-RAN* ]] && print RAN || print blocked)" "blocked"
+    check "and an ACL-writable completion arms no stamp" \
+          "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "absent"
+    rm -rf $s
+
+    # (ii) an ACL-writable .zcompdump reached from a genuinely fresh stamp
+    s=$(mktemp -d); mkdir -p $s/zd/completions
+    zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
+    check "the clean start armed a real stamp (precondition for the dump case)" \
+          "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
+    print -r -- 'print ACL-DUMP-RAN' > $s/zd/.zcompdump
+    chmod 600 $s/zd/.zcompdump
+    chmod +a 'everyone allow write' $s/zd/.zcompdump 2>/dev/null
+    out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1" </dev/null 2>&1 )
+    check "an ACL-writable dump is not executed on the -C fast path" \
+          "$([[ $out == *ACL-DUMP-RAN* ]] && print RAN || print blocked)" "blocked"
+    rm -rf $s
+else
+    print "SKIP  macOS ACL cases (not darwin)"
+fi
+
+# (iii) an fpath entry spelled differently but resolving to the same directory.
+# A raw string filter let `<cache>/` through and the auditor was pinned from it.
+for _alias in '/' '/.' ''; do
+    s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 0777 $s/zd/completions
+    print -r -- 'print COMPINIT-ATTACKER-RAN' > $s/zd/completions/compinit
+    chmod 0666 $s/zd/completions/compinit
+    out=$( zsh -f -c "
+ZDOTDIR=$s/zd
+fpath=($s/zd/completions$_alias \$fpath)
+source $SRC 2>&1
+p=\${\${:-$s/zd/completions}:A}
+n=0; for d in \$fpath; do [[ \${d:A} == \$p ]] && (( n++ )); done
+print PHYS_COUNT=\$n" </dev/null 2>&1 )
+    check "fpath alias '<cache>$_alias' is purged by physical identity" \
+          "$([[ $out == *PHYS_COUNT=0* ]] && print 0 || print nonzero)" "0"
+    check "and no attacker compinit runs via alias '<cache>$_alias'" \
+          "$([[ $out == *COMPINIT-ATTACKER-RAN* ]] && print RAN || print blocked)" "blocked"
+    rm -rf $s
+done
+unset _alias
+
+# (iv) a symlinked alias of the cache directory
+s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 0777 $s/zd/completions
+print -r -- 'print COMPINIT-ATTACKER-RAN' > $s/zd/completions/compinit
+chmod 0666 $s/zd/completions/compinit
+ln -s $s/zd/completions $s/alias-link
+out=$( zsh -f -c "
+ZDOTDIR=$s/zd
+fpath=($s/alias-link \$fpath)
+source $SRC 2>&1
+p=\${\${:-$s/zd/completions}:A}
+n=0; for d in \$fpath; do [[ \${d:A} == \$p ]] && (( n++ )); done
+print PHYS_COUNT=\$n" </dev/null 2>&1 )
+check "a SYMLINKED alias of the cache is purged by physical identity" \
+      "$([[ $out == *PHYS_COUNT=0* ]] && print 0 || print nonzero)" "0"
+check "and no attacker compinit runs via the symlinked alias" \
+      "$([[ $out == *COMPINIT-ATTACKER-RAN* ]] && print RAN || print blocked)" "blocked"
+rm -rf $s
+
 # --- 17. DIFFERENTIAL: the old glob idiom must not come back -----------------
 old_always_true=$(zsh -f -c '
     d=$(mktemp -d); rm -f $d/.zcompdump
