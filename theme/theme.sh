@@ -215,17 +215,21 @@ fetch_img() {
 
 # Save $1 (temp file, mime $2, name hint $3) into WALLPAPER_DIR; sets $SAVED.
 # Identical content under the same name is reused; different content never
-# overwrites — it takes the next free -2, -3, ... suffix.
+# overwrites — it takes the next free -2, -3, ... suffix. Downloads land in
+# the per-source subfolder the caller named in SAVE_SUBDIR (unsplash/,
+# pinterest/, …) — the library is recursive, so list/set/preview see them
+# either way; an empty SAVE_SUBDIR keeps the library root.
 save_wallpaper() {
-    local ext base dest n
+    local ext base dest n dir
     case "$2" in
     image/jpeg) ext=jpg ;; image/png) ext=png ;; image/webp) ext=webp ;;
     image/gif) ext=gif ;; image/avif) ext=avif ;; *) ext="${2#image/}" ;;
     esac
     base=$(slugify "${3%.*}")
     [ -n "$base" ] || base="wallpaper-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$WALLPAPER_DIR" || die "cannot create $WALLPAPER_DIR"
-    dest="$WALLPAPER_DIR/$base.$ext"
+    dir="$WALLPAPER_DIR${SAVE_SUBDIR:+/$SAVE_SUBDIR}"
+    mkdir -p "$dir" || die "cannot create $dir"
+    dest="$dir/$base.$ext"
     n=2
     # ONE mechanism answers both "is this name free?" and "write it": bash's
     # noclobber redirect opens O_CREAT|O_EXCL, which fails on anything already
@@ -253,8 +257,8 @@ save_wallpaper() {
             return 0
         fi
         [ "$n" -le 99 ] ||
-            die "cannot save into $WALLPAPER_DIR — 99 names starting $base are taken"
-        dest="$WALLPAPER_DIR/$base-$n.$ext"
+            die "cannot save into $dir — 99 names starting $base are taken"
+        dest="$dir/$base-$n.$ext"
         n=$((n + 1))
     done
     chmod 644 "$dest"
@@ -640,7 +644,8 @@ cmd_unsplash() {
     # photographer is credited in the terminal note, not the filename.
     maybe_rotate "$SCRATCH"
     maybe_extend "$SCRATCH"
-    save_wallpaper "$SCRATCH" "$mime" "${query:+$query }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
+    SAVE_SUBDIR=unsplash \
+        save_wallpaper "$SCRATCH" "$mime" "${query:+$query }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     scratch_done
     # Unsplash API guideline: report the download so the photographer is
     # credited. $dl is validated to api.unsplash.com above; --url draws an
@@ -752,12 +757,36 @@ cmd_url() {
     esac
     maybe_rotate "$SCRATCH"
     maybe_extend "$SCRATCH"
-    save_wallpaper "$SCRATCH" "$mime" "$hint${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
+    # Route the download into its provider's subfolder (unsplash/, pinterest/,
+    # reddit/); an unrecognized host keeps the library root — per-host folder
+    # sprawl is worse than a flat root for one-off sources.
+    local _sub="" _h
+    _h=$(url_host "$link") && _sub=$(host_label "$_h") || _sub=""
+    SAVE_SUBDIR="$_sub" \
+        save_wallpaper "$SCRATCH" "$mime" "$hint${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     scratch_done
     use_image "$SAVED"
 }
 
 # --- reporting -------------------------------------------------------------
+
+# Hostname → provider label (exact-hostname discipline, never substrings).
+# Shared by wall_source (provenance column) and cmd_url (which saves a
+# download into the label's subfolder). Prints the label and returns 0 on a
+# known provider; returns 1 for everything else.
+host_label() { # $1 host
+    local dom
+    for dom in unsplash.com images.unsplash.com; do
+        host_under "$1" "$dom" && { printf 'unsplash'; return 0; }
+    done
+    for dom in pinimg.com pinterest.com; do
+        host_under "$1" "$dom" && { printf 'pinterest'; return 0; }
+    done
+    for dom in redd.it reddit.com redditmedia.com; do
+        host_under "$1" "$dom" && { printf 'reddit'; return 0; }
+    done
+    return 1
+}
 
 # Where a wallpaper came from, as a short label: the theme.source xattr our
 # own downloads record, falling back to macOS's kMDItemWhereFroms for files a
@@ -779,17 +808,9 @@ wall_source() { # $1 file
     # decided by the parsed hostname and never by a substring: `*unsplash.com*`
     # matched `https://evilunsplash.com/payload` and rendered it `unsplash`,
     # which is exactly the provenance an attacker would want to borrow.
-    local host dom
+    local host
     if host=$(url_host "$src"); then
-        for dom in unsplash.com images.unsplash.com; do
-            host_under "$host" "$dom" && { printf 'unsplash'; return 0; }
-        done
-        for dom in pinimg.com pinterest.com; do
-            host_under "$host" "$dom" && { printf 'pinterest'; return 0; }
-        done
-        for dom in redd.it reddit.com redditmedia.com; do
-            host_under "$host" "$dom" && { printf 'reddit'; return 0; }
-        done
+        host_label "$host" && return 0
         # Anything else is shown as the host it actually is. A Pinterest
         # country domain (pinterest.co.uk) lands here rather than in the label
         # above: naming it honestly beats widening the match to a shape that

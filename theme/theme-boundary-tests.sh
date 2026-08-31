@@ -242,7 +242,10 @@ if grep -q 'stub-sentinel-key' "$goodlog"; then fail "key leaked into curl argv"
 if grep 'api\.unsplash\.com/photos/winged-slug' "$goodlog" | grep -q '^ARGV: -fsLg '; then
     pass "curl globbing off on the API request"
 else fail "API request missing -g (globoff)"; fi
-exists "photo saved under its description"     yes "$lib/stub-photo-of-a-boundary-test.png"
+# Downloads route into their provider subfolder (SAVE_SUBDIR): unsplash
+# fetches land in unsplash/, and the root stays clean.
+exists "photo saved under its description"     yes "$lib/unsplash/stub-photo-of-a-boundary-test.png"
+exists "unsplash download not at library root" no  "$lib/stub-photo-of-a-boundary-test.png"
 
 evillog="$fixture/curl-evil.log"; : >"$evillog"
 check  "lookalike host refused"                1 run_stub "$evillog" unsplash https://evilunsplash.com/photos/x
