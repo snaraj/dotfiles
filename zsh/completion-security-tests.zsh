@@ -300,6 +300,58 @@ check "the current file does NOT honour that inherited stamp" \
       "$(branch_of $s/record)" "full"
 rm -rf $s
 
+# --- 16b. The auditor boundary must hold across source/child lifecycles -------
+# fpath can already carry the cache dir when this file is reached: zshenv exports
+# FPATH (child shells inherit it) and a second `source` still has the first
+# prepend. compinit also re-defers compinit/compaudit on the way out.
+
+# (i) sourced TWICE in the same shell
+s=$(mktemp -d); mkdir -p $s/zd/completions
+print -r -- "print ATTACKER-RAN" > $s/zd/completions/compinit; chmod 0666 $s/zd/completions/compinit
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC; source $SRC" </dev/null 2>&1 )
+check "an attacker compinit never runs when the file is sourced twice" \
+      "$([[ $out == *ATTACKER-RAN* ]] && print RAN || print blocked)" "blocked"
+rm -rf $s
+
+# (ii) a CHILD zsh inheriting the exported FPATH
+s=$(mktemp -d); mkdir -p $s/zd/completions
+print -r -- "print ATTACKER-RAN" > $s/zd/completions/compinit; chmod 0666 $s/zd/completions/compinit
+print -r -- "ZDOTDIR=$s/zd
+fpath=(\${(s.:.)FPATH})
+source $SRC" > $s/child.zsh
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC; export FPATH=\"\${(j.:.)fpath}\"; zsh -f $s/child.zsh" </dev/null 2>&1 )
+check "an attacker compinit never runs in a child shell inheriting FPATH" \
+      "$([[ $out == *ATTACKER-RAN* ]] && print RAN || print blocked)" "blocked"
+rm -rf $s
+
+# (iii) present BEFORE the source, then the auditor is called AFTER it.
+# compinit hands both names back to deferred autoloads on its way out, so
+# without the re-pin the later call resolves them from the cache directory.
+# Two layered controls cover this: the cleanliness gate keeps such a directory
+# off fpath at all, and the re-pin keeps the auditors resolved even if it were
+# on. (Mutation shows the re-pin still blocks when the gate is bypassed.)
+for _victimfn in compinit compaudit; do
+    s=$(mktemp -d); mkdir -p $s/zd/completions
+    print -r -- "print ATTACKER-RAN" > $s/zd/completions/$_victimfn
+    [[ $_victimfn == compaudit ]] && print -r -- "return 0" >> $s/zd/completions/$_victimfn
+    out=$( zsh -f -c "
+ZDOTDIR=$s/zd
+source $SRC >/dev/null 2>&1
+$_victimfn -d $s/zd/.zcompdump 2>&1" </dev/null 2>&1 )
+    check "$_victimfn is not resolved from the cache when called after startup" \
+          "$([[ $out == *ATTACKER-RAN* ]] && print RAN || print blocked)" "blocked"
+    rm -rf $s
+done
+unset _victimfn
+
+# (iv) a directory holding a non-completion entry is rejected and kept off fpath
+s=$(mktemp -d); mkdir -p $s/zd/completions
+print -r -- "print hi" > $s/zd/completions/notacompletion
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC; print FPATH0=\$fpath[1]" </dev/null 2>&1 )
+check "a cache dir holding a non-completion entry is kept off fpath" \
+      "$([[ $out == *"FPATH0=$s/zd/completions"* ]] && print ON-FPATH || print excluded)" "excluded"
+rm -rf $s
+
 # --- 17. DIFFERENTIAL: the old glob idiom must not come back -----------------
 old_always_true=$(zsh -f -c '
     d=$(mktemp -d); rm -f $d/.zcompdump

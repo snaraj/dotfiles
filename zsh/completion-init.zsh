@@ -19,14 +19,26 @@ _zc_stamp=$ZDOTDIR/.zcompaudit-clean
 # Only content this file wrote counts. Bump the version to invalidate all stamps.
 _zc_token='zcompaudit-clean v1'
 
-# Load the audit machinery from the current, still-trusted fpath BEFORE any
-# candidate directory is exposed. zsh resolves an autoload at CALL time, so a
-# writable directory on fpath can supply `compinit` itself — or just `compaudit`,
-# which the real compinit autoloads from that same fpath before it has audited
-# anything. Either is arbitrary shell-startup code execution under exactly the
-# capability this file exists to contain. +X forces the definitions to be read
-# now; a deferred `autoload` would still resolve later, after the prepend.
-autoload -Uz +X compinit compaudit
+# Resolve the audit machinery from an fpath with the cache directory REMOVED,
+# rather than assuming it is not there yet. It can already be present three ways:
+# zsh/zshenv exports FPATH, so a child shell inherits the prepend; a second
+# `source` in the same shell still carries the first source's prepend; and zsh
+# returns compinit/compaudit to DEFERRED autoloads when compinit finishes, so a
+# later call re-resolves them from fpath. Any of those lets the cache directory
+# supply `compinit` itself — or just `compaudit`, which the real compinit
+# autoloads from that same fpath before it has audited anything — which is
+# arbitrary shell-startup code execution under exactly the capability this file
+# exists to contain. +X forces the definitions to be read now; a deferred
+# `autoload` would still resolve later.
+_zc_pin_auditors() {
+    local -a saved
+    saved=($fpath)
+    fpath=(${fpath:#$_zc_dir})
+    unfunction compinit compaudit 2>/dev/null
+    autoload -Uz +X compinit compaudit
+    fpath=($saved)
+}
+_zc_pin_auditors
 
 # Trusted = exists, is NOT a symlink, is owned by us, and is not writable by
 # group or other — the same test compaudit applies. zstat -L is an lstat, so a
@@ -52,9 +64,32 @@ _zc_stamp_ok() {
     [[ "$(<$_zc_stamp)" == $_zc_token ]]
 }
 
+# This cache holds completion functions and nothing else. An entry without the
+# leading underscore — notably `compinit` or `compaudit` — is NOT audited by
+# compaudit (it only looks at completion names), yet would shadow the audit
+# machinery once the directory is on fpath. Its presence disqualifies the
+# directory outright, which also covers a world-writable FILE inside an
+# otherwise correctly-permissioned directory.
+_zc_bad=
+_zc_dir_clean() {
+    local f
+    for f in $_zc_dir/*(N); do
+        [[ ${f:t} == _* ]] && continue
+        _zc_bad=${f:t}
+        return 1
+    done
+    return 0
+}
+
 [[ -e $_zc_dir ]] || mkdir -p -m 700 $_zc_dir
 _zc_dir_ok=0
-_zc_trusted $_zc_dir && _zc_dir_ok=1
+if ! _zc_trusted $_zc_dir; then
+    print -u2 "zsh: ignoring ${_zc_dir} — not owned by you, or writable by others. Fix: chmod go-w ${_zc_dir}"
+elif ! _zc_dir_clean; then
+    print -u2 "zsh: ignoring ${_zc_dir} — it holds a non-completion entry (${_zc_bad}) that could shadow the completion system. Fix: rm ${_zc_dir}/${_zc_bad}"
+else
+    _zc_dir_ok=1
+fi
 
 if (( _zc_dir_ok )); then
     # kubectl/helm are pre-generated into fpath instead of `source <(... completion
@@ -76,12 +111,11 @@ if (( _zc_dir_ok )); then
         fi
     done
     fpath=($_zc_dir $fpath)
-else
-    # Deliberately NOT added to fpath. Leaving it there so compaudit could report
-    # it was the earlier design and it was wrong: it let the untrusted directory
-    # supply the auditor. Losing these completions is the correct trade.
-    print -u2 "zsh: ignoring ${_zc_dir} — not owned by you, or writable by others. Fix: chmod go-w ${_zc_dir}"
 fi
+# A rejected directory is deliberately NOT added to fpath. Leaving it there so
+# compaudit could report it was the earlier design and it was wrong: fpath is
+# what autoload resolves from, so it let the rejected directory supply the
+# auditor. Losing these completions is the correct trade.
 
 # The fast path needs a valid stamp aged into [0, 24h) AND a completion directory
 # that is still trusted RIGHT NOW. The stamp is only a receipt about the past:
@@ -116,7 +150,12 @@ else
     fi
 fi
 
-unset _t _zc_dir _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_dir_ok
-unfunction _zc_trusted _zc_stamp_ok
+# compinit hands compinit/compaudit back to deferred autoloads on its way out,
+# so without this a later call in this shell would resolve them from the cache
+# directory now sitting on fpath.
+_zc_pin_auditors
+
+unset _t _zc_dir _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_dir_ok _zc_bad
+unfunction _zc_trusted _zc_stamp_ok _zc_dir_clean _zc_pin_auditors
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
