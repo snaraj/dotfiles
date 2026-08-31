@@ -572,6 +572,54 @@ fi
 unset _aliases
 rm -rf $s
 
+# (ii-h) stamp publication must never write through a planted destination.
+# An add_file ACL on ZDOTDIR lets another principal plant .zcompaudit-clean as a
+# symlink; a deny-delete ACE on that link defeats removal; and a redirect through
+# the surviving name then clobbers THEIR target with our privileges.
+if [[ $OSTYPE == darwin* ]]; then
+    s=$(mktemp -d); mkdir -p $s/zd/completions $s/victimdir
+    print -r -- 'ORIGINAL-VICTIM-CONTENT' > $s/victimdir/victim
+    chmod 644 $s/victimdir/victim
+    _before=$(shasum -a256 $s/victimdir/victim | cut -d' ' -f1)
+    _vmode_before=$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/victimdir/victim; print \$st[mode]")
+    zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1   # a trusted dump + stamp
+    rm -f $s/zd/$STAMP
+    chmod +a 'everyone allow add_file,search' $s/zd 2>/dev/null
+    ln -s $s/victimdir/victim $s/zd/$STAMP
+    chmod -h +a 'everyone deny delete' $s/zd/$STAMP 2>/dev/null
+    out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1; print COMPS=\${#_comps}" </dev/null 2>&1 )
+    _after=$(shasum -a256 $s/victimdir/victim | cut -d' ' -f1)
+    _vmode_after=$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/victimdir/victim; print \$st[mode]")
+    check "a deny-delete stamp symlink does not clobber its target" "$_after" "$_before"
+    check "and the target's mode is untouched" "$_vmode_after" "$_vmode_before"
+    check "and no receipt is armed through it" \
+          "$([[ -f $s/zd/$STAMP && ! -h $s/zd/$STAMP ]] && print armed || print absent)" "absent"
+    check "and completions still initialise" \
+          "$([[ $out == *COMPS=0* || $out != *COMPS=* ]] && print broken || print working)" "working"
+    check "and no publication temporary is left behind" \
+          "$(command ls -a $s/zd 2>/dev/null | grep -c 'tmp\.' | tr -d ' ')" "0"
+    chmod -h -N $s/zd/$STAMP 2>/dev/null; chmod -N $s/zd 2>/dev/null; rm -rf $s
+    unset _before _after _vmode_before _vmode_after
+else
+    print "SKIP  stamp-symlink clobber case (not darwin)"
+fi
+
+# (ii-i) even with a CLEAN parent, publication must not follow a symlink at the
+# destination — this exercises the atomic rename independently of the ancestor
+# check above.
+s=$(mktemp -d); mkdir -p $s/zd/completions $s/victimdir
+print -r -- 'ORIGINAL-VICTIM-CONTENT' > $s/victimdir/victim
+_before=$(shasum -a256 $s/victimdir/victim | cut -d' ' -f1)
+ln -s $s/victimdir/victim $s/zd/$STAMP
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1; print COMPS=\${#_comps}" </dev/null 2>&1 )
+_after=$(shasum -a256 $s/victimdir/victim | cut -d' ' -f1)
+check "a stamp symlink is replaced, not written through, on a clean parent" \
+      "$_after" "$_before"
+check "and the real stamp is a regular owner-only file afterwards" \
+      "$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; [[ -f $s/zd/$STAMP && ! -h $s/zd/$STAMP ]] && zstat -H st -L -- $s/zd/$STAMP && print \$(( (st[mode] & 8#77) == 0 )) || print no")" "1"
+unset _before _after
+rm -rf $s
+
 # (iii) an fpath entry spelled differently but resolving to the same directory.
 # A raw string filter let `<cache>/` through and the auditor was pinned from it.
 for _alias in '/' '/.' ''; do

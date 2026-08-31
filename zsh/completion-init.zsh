@@ -159,6 +159,32 @@ _zc_dir_clean() {
     return 0
 }
 
+# The stamp's PARENT is part of the trust boundary. _zc_no_acl covers the files
+# it is handed, not the directory entry that holds them: an ACL granting
+# add_file on ZDOTDIR lets another principal plant .zcompaudit-clean as a
+# SYMLINK — and a deny-delete ACE on the link they own defeats removal — after
+# which a redirect through that name writes and chmods THEIR chosen target with
+# our privileges. Add-only access to the config directory otherwise becomes an
+# arbitrary file clobber at shell startup.
+_zc_home_ok=0
+_zc_trusted $ZDOTDIR && _zc_no_acl $ZDOTDIR && _zc_home_ok=1
+(( _zc_home_ok )) || print -u2 "zsh: ${ZDOTDIR} is writable by others or carries an extended ACL; completion caching is disabled. Inspect: ls -lde ${ZDOTDIR}"
+
+# Publish the stamp by ATOMIC RENAME from a fresh owner-only file, never by
+# redirecting through the destination name: `>|` follows a symlink planted
+# there, while rename replaces the entry itself and cannot be redirected. Every
+# step is checked and the result revalidated; any failure arms nothing.
+_zc_publish_stamp() {
+    (( _zc_home_ok )) || return 1
+    local tmp=$ZDOTDIR/.zcompaudit-clean.tmp.$$
+    rm -f -- $tmp 2>/dev/null
+    [[ -e $tmp || -h $tmp ]] && return 1
+    print -r -- $_zc_token >| $tmp 2>/dev/null || { rm -f -- $tmp 2>/dev/null; return 1 }
+    chmod 600 $tmp 2>/dev/null || { rm -f -- $tmp 2>/dev/null; return 1 }
+    mv -f -- $tmp $_zc_stamp 2>/dev/null || { rm -f -- $tmp 2>/dev/null; return 1 }
+    _zc_stamp_ok
+}
+
 [[ -e $_zc_dir ]] || mkdir -p -m 700 $_zc_dir
 _zc_dir_ok=0
 if ! _zc_trusted $_zc_dir; then
@@ -208,7 +234,7 @@ fi
 # dropping it breaks both — it rejects clock-rollback and future timestamps, and
 # -1 is the "no usable stamp" sentinel, which would otherwise satisfy `< 86400`.
 _zc_age=-1
-if (( _zc_dir_ok )) && _zc_stamp_ok; then
+if (( _zc_dir_ok && _zc_home_ok )) && _zc_stamp_ok; then
     _zc_age=$(( EPOCHSECONDS - _zc_st[mtime] ))
 fi
 
@@ -269,10 +295,9 @@ else
     # certified; a clean audit over a dump we cannot vouch for is not a receipt.
     if (( _zc_rc == 0 && _zc_dir_ok )) && [[ -z ${_comp_secure-} ]] &&
        _zc_dump_ok; then
-        rm -f -- $_zc_stamp
-        print -r -- $_zc_token >| $_zc_stamp && chmod 600 $_zc_stamp
+        _zc_publish_stamp || rm -f -- $_zc_stamp 2>/dev/null
     else
-        rm -f -- $_zc_stamp
+        rm -f -- $_zc_stamp 2>/dev/null
     fi
 fi
 
@@ -281,7 +306,7 @@ fi
 # directory now sitting on fpath.
 _zc_pin_auditors
 
-unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_umask _zc_dir_ok _zc_why _zc_ls _zc_nodump
-unfunction _zc_trusted _zc_stamp_ok _zc_dump_ok _zc_dir_clean _zc_pin_auditors _zc_strip_cache _zc_no_acl
+unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_umask _zc_dir_ok _zc_home_ok _zc_why _zc_ls _zc_nodump
+unfunction _zc_trusted _zc_stamp_ok _zc_dump_ok _zc_publish_stamp _zc_dir_clean _zc_pin_auditors _zc_strip_cache _zc_no_acl
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
