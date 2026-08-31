@@ -219,74 +219,143 @@ fetch_img() {
 # the per-source subfolder the caller named in SAVE_SUBDIR (unsplash/,
 # pinterest/, …) — the library is recursive, so list/set/preview see them
 # either way; an empty SAVE_SUBDIR keeps the library root.
+# Destination selection AND creation, bound to a DIRECTORY DESCRIPTOR.
+#
+# Every pathname operation in shell re-resolves the whole string, so no
+# amount of canonicalizing can bind a check to the write that follows it: an
+# attacker who renames the checked provider directory and drops a symlink at
+# the same name redirects the open, and `pwd -P` output is just a string that
+# resolves through the new link. (Demonstrated by review against exactly that
+# swap.) Binding requires a descriptor, and shell has no openat: bash cannot
+# traverse /dev/fd/N on macOS, so the create happens here instead. python3 is
+# already required by this tool.
+#
+# The library root is opened following symlinks — a library kept on another
+# volume through a symlink is normal. The provider subdirectory is then
+# opened RELATIVE to that descriptor with O_NOFOLLOW, which in one operation
+# proves it is not a symlink and is a real child of the library: there is no
+# path string left for anyone to re-point. Every subsequent create is
+# O_CREAT|O_EXCL|O_NOFOLLOW against that same descriptor, so the file lands
+# in the directory that was checked, whatever happens to its NAME meanwhile.
+#
+# Prints "SAVED <path>", "REUSED <path>", or "ERR <message>".
+SAVE_PY='
+import errno, os, sys
+src, lib, sub, base, ext = sys.argv[1:6]
+def out(tag, val):
+    sys.stdout.write(tag + " " + val + "\n"); raise SystemExit(0)
+try:
+    libfd = os.open(lib, os.O_RDONLY | os.O_DIRECTORY)
+except OSError as e:
+    out("ERR", "cannot open the wallpaper library " + lib + ": " + e.strerror)
+dirfd, where = libfd, lib
+if sub:
+    # A provider label is ONE component. Anything else is a caller bug, and a
+    # caller bug here is a directory traversal.
+    if sub in (".", "..") or "/" in sub:
+        out("ERR", "invalid provider folder " + sub)
+    try:
+        os.mkdir(sub, 0o755, dir_fd=libfd)
+    except FileExistsError:
+        pass
+    except OSError as e:
+        out("ERR", "cannot create " + lib + "/" + sub + ": " + e.strerror)
+    try:
+        dirfd = os.open(sub, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=libfd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+            out("ERR", "refusing to save through " + lib + "/" + sub +
+                " — the provider folder is a symlink, not a directory in the library")
+        out("ERR", "cannot open " + lib + "/" + sub + ": " + e.strerror)
+    where = lib + "/" + sub
+try:
+    with open(src, "rb") as f:
+        data = f.read()
+except OSError as e:
+    out("ERR", "cannot read the downloaded file: " + e.strerror)
+n = 1
+while n <= 99:
+    name = base + "." + ext if n == 1 else base + "-" + str(n) + "." + ext
+    try:
+        fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     0o644, dir_fd=dirfd)
+    except FileExistsError:
+        # Occupied. Reuse ONLY a byte-identical regular file that is not a
+        # symlink: an alias to identical bytes is still not that file, and
+        # adopting it would put a pointer in the library under its own name.
+        try:
+            st = os.lstat(name, dir_fd=dirfd)
+            import stat as _s
+            if _s.S_ISREG(st.st_mode):
+                efd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+                try:
+                    with os.fdopen(efd, "rb") as g:
+                        same = g.read() == data
+                finally:
+                    pass
+                if same:
+                    out("REUSED", where + "/" + name)
+        except OSError:
+            pass
+        n += 1
+        continue
+    except OSError as e:
+        out("ERR", "cannot write " + where + "/" + name + ": " + e.strerror)
+    try:
+        st = os.fstat(fd)
+        with os.fdopen(fd, "wb") as g:
+            g.write(data)
+        os.chmod(name, 0o644, dir_fd=dirfd, follow_symlinks=False)
+    except OSError as e:
+        out("ERR", "cannot write " + where + "/" + name + ": " + e.strerror)
+    # The bytes are safely inside the checked directory, but the PATH we are
+    # about to hand back is a string, and the caller resolves it again for the
+    # xattr, the size probe and the wallpaper set. If the provider name was
+    # swapped while we worked, that string now resolves somewhere else — so
+    # prove it still names the file just written, by identity rather than by
+    # spelling, and fail closed if it does not.
+    final = where + "/" + name
+    try:
+        fs = os.stat(final)
+        if (fs.st_dev, fs.st_ino) != (st.st_dev, st.st_ino):
+            raise OSError(0, "identity changed")
+    except OSError:
+        out("ERR", "the provider folder changed underneath the save — the file "
+            "was written inside the library, but " + final + " no longer refers "
+            "to it; refusing to continue with a path that moved")
+    out("SAVED", final)
+out("ERR", "cannot save into " + where + " — 99 names starting " + base + " are taken")
+'
+
 save_wallpaper() {
-    local ext base dest n dir libreal dirreal
+    local ext base dest
     case "$2" in
     image/jpeg) ext=jpg ;; image/png) ext=png ;; image/webp) ext=webp ;;
     image/gif) ext=gif ;; image/avif) ext=avif ;; *) ext="${2#image/}" ;;
     esac
     base=$(slugify "${3%.*}")
     [ -n "$base" ] || base="wallpaper-$(date +%Y%m%d-%H%M%S)"
-    dir="$WALLPAPER_DIR${SAVE_SUBDIR:+/$SAVE_SUBDIR}"
-    mkdir -p "$dir" || die "cannot create $dir"
-    # The noclobber write below defends the LEAF and only the leaf. The
-    # provider subdirectory is a PARENT component, and mkdir -p is happy to
-    # "create" a path whose last component already exists as a symlink — so a
-    # pre-planted `unsplash -> /somewhere/else` silently receives every
-    # download, outside the library, with no name collision to notice.
-    #
-    # Prove the directory belongs to the library before writing through it:
-    # not a symlink itself, and canonically the library root or a descendant.
-    # `cd`+`pwd -P` resolves every component, so a symlink anywhere along the
-    # path lands outside and is refused. $dir is then REPLACED by its
-    # canonical form, which is what binds the check to the write: the
-    # destination is opened through the physical directory that was checked,
-    # not through a name that could be re-pointed afterwards.
-    if [ -n "${SAVE_SUBDIR:-}" ] && [ -L "$dir" ]; then
-        die "refusing to save through $dir — the provider folder is a symlink, not a directory in the library"
-    fi
-    libreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) ||
-        die "cannot resolve the wallpaper library $WALLPAPER_DIR"
-    dirreal=$(cd "$dir" 2>/dev/null && pwd -P) ||
-        die "cannot resolve $dir"
-    case "$dirreal" in
-    "$libreal" | "$libreal"/*) ;;
-    *) die "refusing to save outside the wallpaper library — $dir resolves to $dirreal, which is not under $libreal" ;;
+    # One call does destination selection AND creation, bound to a directory
+    # descriptor (see SAVE_PY above): the provider folder is opened relative
+    # to the library with O_NOFOLLOW, and every create is O_EXCL|O_NOFOLLOW
+    # against that descriptor. The symlink refusal, the containment proof and
+    # the write are then a single indivisible sequence rather than a check
+    # followed by a re-resolved pathname.
+    local result tag
+    result=$(python3 -c "$SAVE_PY" "$1" "$WALLPAPER_DIR" "${SAVE_SUBDIR:-}" "$base" "$ext") ||
+        die "saving failed"
+    tag=${result%% *}
+    dest=${result#* }
+    case "$tag" in
+    ERR) die "$dest" ;;
+    REUSED)
+        SAVED="$dest"
+        [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
+            xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
+        note "already have $(basename "$dest") — reusing it"
+        return 0
+        ;;
     esac
-    dir="$dirreal"
-    dest="$dir/$base.$ext"
-    n=2
-    # ONE mechanism answers both "is this name free?" and "write it": bash's
-    # noclobber redirect opens O_CREAT|O_EXCL, which fails on anything already
-    # at the path — regular file, directory, or symlink, INCLUDING a dangling
-    # one. Asking with `[ -e ]` first would be two mistakes at once: `-e`
-    # FOLLOWS symlinks, so a dangling symlink planted in the library reads as a
-    # vacant slot and a plain `cp` writes straight through it to a target
-    # outside the library; and a separate check leaves a window in which the
-    # answer can change before the write. There is no window here because there
-    # is no separate check.
-    until ( set -C; cat "$1" >"$dest" ) 2>/dev/null; do
-        # The redirect failed. If nothing is at the path, the cause was not an
-        # occupied name — the directory is unwritable, or worse — and trying
-        # suffixes would just spin.
-        [ -e "$dest" ] || [ -L "$dest" ] || die "cannot write $dest"
-        # Occupied. Reuse only a byte-identical PLAIN file: `-f` follows
-        # symlinks, so `-L` is what stops an alias to an identical file from
-        # being adopted as the saved wallpaper.
-        if [ -f "$dest" ] && [ ! -L "$dest" ] &&
-            [ "$(hash_of "$1")" = "$(hash_of "$dest")" ]; then
-            SAVED="$dest"
-            [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
-                xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
-            note "already have $(basename "$dest") — reusing it"
-            return 0
-        fi
-        [ "$n" -le 99 ] ||
-            die "cannot save into $dir — 99 names starting $base are taken"
-        dest="$dir/$base-$n.$ext"
-        n=$((n + 1))
-    done
-    chmod 644 "$dest"
     SAVED="$dest"
     # Provenance for `theme list`: where this wallpaper came from, recorded on
     # the file itself. Read back by wall_source(); best-effort, never fatal.

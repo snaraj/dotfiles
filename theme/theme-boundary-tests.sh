@@ -541,6 +541,56 @@ okslib="$fixture/subdir-ok"; mkdir -p "$okslib"
 PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$okslib" THEME_NO_APPLY=1 \
     TMPDIR="$fixture/tmpdir" bash "$THEME" url https://images.unsplash.com/fine.png >/dev/null 2>&1
 exists "an ordinary provider folder still receives the download" yes "$okslib/unsplash/fine.png"
+
+# --- the provider check must BIND to the write, not to a pathname ----------
+# Refusing a symlink that is already there is the easy half. The hard half is
+# a swap DURING the save: rename the checked directory and drop a symlink at
+# the same name, and any implementation that kept only a path string — even a
+# canonicalized one — re-resolves it and writes outside the library. (Review
+# demonstrated exactly that against the pathname version.)
+#
+# The window is opened deterministically rather than raced: the source is a
+# FIFO, so the saver blocks mid-flight, AFTER it has opened and validated the
+# provider directory and BEFORE it writes. The swap happens while it is
+# blocked, which is precisely the check/use boundary.
+swapdir="$fixture/swap"; mkdir -p "$swapdir/lib/unsplash" "$swapdir/outside"
+swapfifo="$swapdir/src.fifo"; rm -f "$swapfifo"; mkfifo "$swapfifo"
+# The saver is the shipped helper, lifted out of the tool. An implementation
+# that has no such helper cannot bind a descriptor at all, so its absence is a
+# FAILURE of this control, not a reason to skip the case.
+swapsrc=$(sed -n "/^SAVE_PY='\$/,/^'\$/p" "$THEME" | sed '1d;$d')
+(
+    # Give the saver time to reach its blocking read, then swap the NAME.
+    # The write is backgrounded behind a timeout so a saver that never opens
+    # the FIFO (one without the helper) cannot wedge the suite.
+    sleep 1
+    mv "$swapdir/lib/unsplash" "$swapdir/lib/checked-dir" 2>/dev/null
+    ln -s "$swapdir/outside" "$swapdir/lib/unsplash" 2>/dev/null
+    ( printf '\211PNG\r\n\032\n' >"$swapfifo" ) &
+    fw=$!
+    ( sleep 5; kill $fw 2>/dev/null ) 2>/dev/null &
+    wait $fw 2>/dev/null
+) &
+swapper=$!
+if [ -n "$swapsrc" ]; then
+    swapout=$(python3 -c "$swapsrc" "$swapfifo" "$swapdir/lib" unsplash pic png 2>&1)
+else
+    swapout="no descriptor-bound saver in this implementation"
+    # Unblock the writer so the suite proceeds.
+    ( timeout 6 cat "$swapfifo" >/dev/null 2>&1 || true ) &
+fi
+wait $swapper 2>/dev/null
+if [ "$(find "$swapdir/outside" -type f | wc -l | tr -d ' ')" = 0 ]; then
+    pass "a mid-save provider swap writes nothing outside the library"
+else fail "the check/use swap redirected the write outside the library"; fi
+if [ -f "$swapdir/lib/checked-dir/pic.png" ]; then
+    pass "the bytes land in the directory that was actually checked"
+else fail "the write did not land in the checked directory"; fi
+case "$swapout" in
+*"changed underneath the save"*)
+    pass "and the moved path is refused rather than handed onward" ;;
+*) fail "a path that moved underneath the save was handed back: $swapout" ;;
+esac
 # A symlink to an IDENTICAL in-library file is still not that file. `-f`
 # follows symlinks, so without the `-L` arm the alias hashes equal and gets
 # adopted as the saved wallpaper — the library would then hold a wallpaper
