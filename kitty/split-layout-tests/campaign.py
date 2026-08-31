@@ -35,6 +35,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -85,6 +86,7 @@ class RCError(Exception):
 class Lab:
     def __init__(self, verbose: bool = False) -> None:
         self.sock_path: str | None = None
+        self.proc: subprocess.Popen | None = None
         self.verbose = verbose
         self.restarts = 0
         self.ensure_kitty()
@@ -98,8 +100,31 @@ class Lab:
         return socks[-1] if socks else None
 
     def kill_kitty(self) -> None:
-        subprocess.run(['pkill', '-f', 'kitty --config ' + LAB + '/lab.conf'],
-                       capture_output=True)
+        # Teardown is bound to THE PROCESS WE LAUNCHED, never to a pattern.
+        # It used to pkill on the lab.conf path, which every campaign started
+        # from this checkout shares: a short run finishing, or any
+        # force-restart, killed the kitty of a longer run still going. Review
+        # demonstrated it by loading the module twice - two distinct
+        # SOCK_BASE values, one identical selector containing neither.
+        #
+        # Holding the Popen handle (no --detach) makes the scope exact rather
+        # than incidental: a PID we own cannot match a sibling campaign, and
+        # structurally cannot match the terminal the operator is sitting in,
+        # whatever arguments it happens to have been started with.
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        self.proc = None
+        # Fallback only for a kitty that outlived its handle. The selector is
+        # the per-run socket path, which is unique to this process.
+        subprocess.run(['pkill', '-f', 'unix:' + SOCK_BASE], capture_output=True)
         for s in glob.glob(SOCK_BASE + '*'):
             try:
                 os.unlink(s)
@@ -114,10 +139,12 @@ class Lab:
         self.sock_path = self.find_socket()
         if self.sock_path is None:
             env = dict(os.environ, KITTY_CONFIG_DIRECTORY=LAB)
-            subprocess.Popen(
+            # No --detach: we keep the handle, so teardown can name the exact
+            # process instead of guessing at one with a pattern.
+            self.proc = subprocess.Popen(
                 [KITTY, '--config', os.path.join(LAB, 'lab.conf'),
                  '--listen-on', 'unix:' + SOCK_BASE,
-                 '--start-as=minimized', '--detach'],
+                 '--start-as=minimized'],
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             for _ in range(100):
                 time.sleep(0.2)
@@ -579,6 +606,16 @@ def main():
 
     t0 = time.time()
     lab = Lab()
+    # A crash, a traceback or a ctrl-c must not leave a minimized kitty on
+    # the operator machine - that is how the last stray instance got there.
+    # Scoped to this Lab, so it can only ever reap what this run started.
+    if not args.leave_running:
+        atexit.register(lab.kill_kitty)
+        # SIGTERM kills outright and atexit never runs, so the lab would
+        # outlive the campaign. Turning it into SystemExit lets the same
+        # scoped teardown run for a kill as for a ctrl-c.
+        signal.signal(signal.SIGTERM,
+                      lambda *_: sys.exit('terminated'))
     if args.restart:
         lab.ensure_kitty(force_restart=True)
     logf = open(args.log, 'a')
