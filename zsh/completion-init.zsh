@@ -47,27 +47,38 @@ _zc_strip_cache() {
 
 # macOS ACLs grant write to another principal while the POSIX mode still reads
 # 0600 and zstat still reports us as the owner, and there is no zstat for ACLs.
-# `ls -lde` prints a numbered ACE line for every entry of an extended ACL. This
-# cache has no legitimate use for one, so ANY ACL fails closed — as does an
-# unreadable path. Note the `@` in `ls -l` means extended ATTRIBUTES, not an
-# ACL, so the mode-string marker is NOT a sufficient test.
+# This cache has no legitimate use for one, so ANY ACL fails closed — as does an
+# unreadable path.
+#
 # The probe is platform-specific. macOS `ls -lde` prints a numbered ACE line per
-# ACL entry; GNU/coreutils `ls` has NO -e option, so using it unconditionally
-# made the command fail on the documented Ubuntu install and rejected every
-# clean cache — disabling completions and preventing the fast path from ever
-# arming. GNU `ls -l` instead appends '+' to the mode field for an ACL. (The '@'
-# macOS shows means extended ATTRIBUTES and is not an ACL, which is why the
-# marker test cannot be used on darwin.)
+# ACL entry; GNU/coreutils `ls` has NO -e option, so running it unconditionally
+# failed on the documented Ubuntu install and rejected every clean cache,
+# disabling completions entirely. GNU `ls -l` instead appends '+' to the mode
+# field. (The '@' macOS shows means extended ATTRIBUTES, not an ACL, which is
+# why the marker test cannot be used on darwin.)
+#
+# The binary is resolved to an absolute path ONCE and invoked through a
+# parameter. A bare `ls` would be alias-expanded AT PARSE TIME — zsh/.zshrc
+# sources zsh/aliases.zsh first, where `alias ls='eza …'` is defined — so the
+# production shell would have probed ACLs with eza, whose output contract is
+# nothing like the one this code reads.
+_zc_ls=
+for _zc_c in /bin/ls /usr/bin/ls; do
+    [[ -x $_zc_c ]] && { _zc_ls=$_zc_c; break }
+done
+unset _zc_c
+
 _zc_no_acl() {
     (( $# )) || return 0
+    [[ -n $_zc_ls ]] || return 1
     local out line
     if [[ $OSTYPE == darwin* ]]; then
-        out=$(/bin/ls -lde -- "$@" 2>/dev/null) || return 1
+        out=$($_zc_ls -lde -- "$@" 2>/dev/null) || return 1
         for line in ${(f)out}; do
             [[ ${line//[[:space:]]/} == <->:* ]] && return 1
         done
     else
-        out=$(ls -ld -- "$@" 2>/dev/null) || return 1
+        out=$($_zc_ls -ld -- "$@" 2>/dev/null) || return 1
         for line in ${(f)out}; do
             [[ ${${(z)line}[1]} == *+ ]] && return 1
         done
@@ -201,18 +212,41 @@ if (( _zc_dir_ok )) && _zc_stamp_ok; then
     _zc_age=$(( EPOCHSECONDS - _zc_st[mtime] ))
 fi
 
-# A dump that fails trust is UNLINKED, not merely skipped. `compinit -d` SOURCES
-# an existing dump whenever its header's file count and zsh version still match,
-# and it does not check the dump's permissions — so declining the -C fast path
-# while handing the same file to the full path still executes attacker code
-# appended below a genuine header. Its stamp goes with it.
-if [[ -e $_zc_dump ]] && { ! _zc_trusted $_zc_dump || ! _zc_no_acl $_zc_dump }; then
-    rm -f -- $_zc_dump $_zc_stamp
+# A dump must be a REGULAR file. The generic node predicate accepts a DIRECTORY
+# named .zcompdump, and compinit then moves each generated dump INTO it instead
+# of replacing it, while this code happily certified the directory as trusted.
+_zc_dump_ok() {
+    [[ -f $_zc_dump && ! -h $_zc_dump ]] || return 1
+    _zc_trusted $_zc_dump && _zc_no_acl $_zc_dump
+}
+
+# Disposal must be PROVEN, not attempted. `compinit -d` SOURCES an existing dump
+# whenever its header's file count and zsh version still match, and it does not
+# check that file's permissions — so declining the -C fast path while handing
+# the same path to the full path still executes attacker code appended below a
+# genuine header. And the removal itself can fail: a macOS ACL can grant write
+# while DENYING delete, so `rm -f` returns non-zero and the hostile dump
+# survives. Ignoring rm's result and passing the path on is the bug this closes.
+# Anything still present afterwards — a deny-delete file, or a directory, which
+# is never recursively deleted here — is a failed-disposal state: initialise
+# with NO dump at all rather than hand compinit something unproven.
+_zc_nodump=0
+if [[ -e $_zc_dump || -h $_zc_dump ]] && ! _zc_dump_ok; then
+    rm -f -- $_zc_dump 2>/dev/null
+    rm -f -- $_zc_stamp 2>/dev/null
     _zc_age=-1
+    if [[ -e $_zc_dump || -h $_zc_dump ]]; then
+        _zc_nodump=1
+        print -u2 "zsh: refusing to use ${_zc_dump} — it failed the trust check and could not be removed (a deny-delete ACL, or a directory). Completions start without a cache this session. Inspect: ls -lde ${_zc_dump}"
+    fi
 fi
 
-if (( _zc_age >= 0 && _zc_age < 86400 )) && _zc_trusted $_zc_dump &&
-   _zc_no_acl $_zc_dump $_zc_stamp; then
+if (( _zc_nodump )); then
+    # -D: run the full audit but neither read nor write any dump file.
+    compinit -D
+    rm -f -- $_zc_stamp 2>/dev/null
+elif (( _zc_age >= 0 && _zc_age < 86400 )) && _zc_dump_ok &&
+     _zc_no_acl $_zc_stamp; then
     compinit -C -d $_zc_dump
 else
     # fixed umask: compinit creates the dump, and under a permissive ambient
@@ -234,7 +268,7 @@ else
     # the freshly written dump must itself pass every trust check before it is
     # certified; a clean audit over a dump we cannot vouch for is not a receipt.
     if (( _zc_rc == 0 && _zc_dir_ok )) && [[ -z ${_comp_secure-} ]] &&
-       _zc_trusted $_zc_dump && _zc_no_acl $_zc_dump; then
+       _zc_dump_ok; then
         rm -f -- $_zc_stamp
         print -r -- $_zc_token >| $_zc_stamp && chmod 600 $_zc_stamp
     else
@@ -247,7 +281,7 @@ fi
 # directory now sitting on fpath.
 _zc_pin_auditors
 
-unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_umask _zc_dir_ok _zc_why
-unfunction _zc_trusted _zc_stamp_ok _zc_dir_clean _zc_pin_auditors _zc_strip_cache _zc_no_acl
+unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_umask _zc_dir_ok _zc_why _zc_ls _zc_nodump
+unfunction _zc_trusted _zc_stamp_ok _zc_dump_ok _zc_dir_clean _zc_pin_auditors _zc_strip_cache _zc_no_acl
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'

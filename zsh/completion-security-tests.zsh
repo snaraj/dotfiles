@@ -493,6 +493,85 @@ check "and the fast path still arms there" \
       "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
 rm -rf $s
 
+# (ii-e) a dump that CANNOT be deleted must never reach compinit.
+# macOS ACLs can grant write while denying delete, so `rm -f` fails on exactly
+# the file that must go. The payload is appended below the genuine header.
+if [[ $OSTYPE == darwin* ]]; then
+    s=$(mktemp -d); mkdir -p $s/zd/completions
+    zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
+    print -r -- '' >> $s/zd/.zcompdump
+    print -r -- 'print DENY-DELETE-PAYLOAD-RAN' >> $s/zd/.zcompdump
+    chmod 600 $s/zd/.zcompdump
+    chmod +a 'everyone allow write' $s/zd/.zcompdump 2>/dev/null
+    chmod +a 'everyone deny delete' $s/zd/.zcompdump 2>/dev/null
+    out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1; print COMPS=\${#_comps}" </dev/null 2>&1 )
+    check "an undeletable hostile dump is never sourced" \
+          "$([[ $out == *DENY-DELETE-PAYLOAD-RAN* ]] && print RAN || print blocked)" "blocked"
+    check "and its stamp is not armed" \
+          "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "absent"
+    check "and completions still initialise without a cache" \
+          "$([[ $out == *COMPS=0* || $out != *COMPS=* ]] && print broken || print working)" "working"
+    chmod -N $s/zd/.zcompdump 2>/dev/null; rm -rf $s
+else
+    print "SKIP  deny-delete ACL case (not darwin)"
+fi
+
+# (ii-f) a DIRECTORY named .zcompdump must not be certified, nor deleted
+# recursively, nor used as a destination for generated dumps.
+s=$(mktemp -d); mkdir -p $s/zd/completions; mkdir -p -m 700 $s/zd/.zcompdump
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1; print COMPS=\${#_comps}" </dev/null 2>&1 )
+check "a .zcompdump DIRECTORY is not certified with a stamp" \
+      "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "absent"
+check "and it is not recursively deleted" \
+      "$([[ -d $s/zd/.zcompdump ]] && print preserved || print DELETED)" "preserved"
+check "and compinit does not deposit a dump inside it" \
+      "$(command ls -1 $s/zd/.zcompdump 2>/dev/null | wc -l | tr -d ' ')" "0"
+check "and completions still initialise" \
+      "$([[ $out == *COMPS=0* || $out != *COMPS=* ]] && print broken || print working)" "working"
+rm -rf $s
+
+# (ii-g) the ACL probe must not be alias-expanded. zsh/.zshrc sources
+# zsh/aliases.zsh BEFORE this file, and that defines `alias ls='eza …'`; zsh
+# expands aliases at PARSE time, so a bare `ls` inside the function would run
+# eza in production. Loads the real shipped aliases, then this file.
+#
+# The observable is the DOWNSTREAM effect, not the stub's output: the probe
+# captures its command's stdout into a function-local, so a "did the stub run"
+# assertion could never see it and would be vacuous. If the wrong binary is
+# used, its output does not match the expected contract, the ACL check fails
+# closed, and the cache is rejected — so "is the cache still accepted" is the
+# assertion with real content.
+s=$(mktemp -d); mkdir -p $s/zd/completions
+_aliases=${SRC:h}/aliases.zsh
+if [[ -r $_aliases ]]; then
+    out=$( zsh -f -c "
+ZDOTDIR=$s/zd
+CONFIG_DIR=${SRC:h:h}
+source $_aliases 2>/dev/null
+alias ls='print EZA-STUB-RAN;'
+source $SRC 2>&1
+print COMPS=\${#_comps}" </dev/null 2>&1 )
+    check "and a clean cache is still accepted with aliases loaded" \
+          "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
+    # ...and the same on the NON-darwin branch, which is where the bare `ls`
+    # actually lived. On macOS the darwin branch already used an absolute path,
+    # so only this variant exercises the defect.
+    rm -rf $s; s=$(mktemp -d); mkdir -p $s/zd/completions
+    out=$( zsh -f -c "
+OSTYPE=linux-gnu
+ZDOTDIR=$s/zd
+source $_aliases 2>/dev/null
+alias ls='print EZA-STUB-RAN;'
+source $SRC 2>&1
+print COMPS=\${#_comps}" </dev/null 2>&1 )
+    check "and a clean cache is accepted on the linux branch with aliases loaded" \
+          "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
+else
+    print "SKIP  alias-expansion case (aliases.zsh not readable)"
+fi
+unset _aliases
+rm -rf $s
+
 # (iii) an fpath entry spelled differently but resolving to the same directory.
 # A raw string filter let `<cache>/` through and the auditor was pinned from it.
 for _alias in '/' '/.' ''; do
