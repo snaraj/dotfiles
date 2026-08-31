@@ -61,6 +61,32 @@ exists() { # $1 description, $2 yes|no, $3 path
     else fail "$1"; fi
 }
 
+# The AMBIENT credential environment is neutralised once, here, for the whole
+# fixture. Pinning it at individual call sites is whack-a-mole: review found a
+# single unpinned invocation (the contributor-credit case) that inherited an
+# exported UNSPLASH_USER_TOKEN, and a hostile one — the same quote/newline
+# value this fixture uses elsewhere — turned the suite red on a machine where
+# nothing in the tool had changed. Nineteen other direct invocations had the
+# same exposure. A fixture whose result depends on the operator's shell is not
+# measuring the code, so every credential a case needs is now set BY that
+# case, explicitly, and nothing arrives from outside.
+outer_token="${UNSPLASH_USER_TOKEN-}"
+export UNSPLASH_USER_TOKEN="" UNSPLASH_ACCESS_KEY="" UNSPLASH_SECRET_KEY=""
+
+# Two ways to catch the neutralisation going away again. The structural one
+# fires on any machine, dirty environment or not; the runtime one measures
+# what a child process actually receives. Deleting the export above turns the
+# first red immediately, which is the point — a hermeticity claim that only
+# holds when the operator happens to have an empty environment is not one.
+if grep -q '^export UNSPLASH_USER_TOKEN="" UNSPLASH_ACCESS_KEY="" UNSPLASH_SECRET_KEY=""$' "$0" &&
+    [ "$(grep -c '^export UNSPLASH_USER_TOKEN' "$0")" = 1 ]; then
+    pass "the fixture neutralises the ambient credential environment exactly once"
+else fail "the fixture no longer neutralises the ambient credential environment"; fi
+child_env=$(bash -c 'printf "%s|%s|%s" "${UNSPLASH_USER_TOKEN-unset}" "${UNSPLASH_ACCESS_KEY-unset}" "${UNSPLASH_SECRET_KEY-unset}"')
+if [ "$child_env" = "||" ]; then
+    pass "no ambient credential reaches an unpinned child (outer token was ${#outer_token} bytes)"
+else fail "an ambient credential reached an unpinned child: $child_env"; fi
+
 fixture=$(mktemp -d -t theme-boundary) || exit 1
 trap 'rm -rf "$fixture"' EXIT
 lib="$fixture/library"
@@ -78,9 +104,9 @@ printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA
 printf 'not an image' >"$lib/broken.jpg"
 
 # shellcheck disable=SC2317,SC2329  # run is reached indirectly via check()'s "$@"
-run() { WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
+run() { THEME_WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_nokitty() { WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "${@:2}"; }
+run_nokitty() { THEME_WALLPAPER_DIR="$1" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "${@:2}"; }
 
 # --- positive destructive ops must MUTATE, not merely exit 0 ---------------
 check  "in-library rm succeeds"                0 run "$lib" rm in-lib.jpg
@@ -145,7 +171,7 @@ else fail "'theme wal' still dispatches instead of being unknown"; fi
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
     base64 -d >"$lib/long-src.png"
 xattr -w theme.source "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bb.invalid/x" "$lib/long-src.png" 2>/dev/null
-pv_out=$(COLUMNS=60 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview long-src 2>/dev/null)
+pv_out=$(COLUMNS=60 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview long-src 2>/dev/null)
 # At 60 columns availw is 25: 24 a's then an ellipsis, and never a 25th 'a'.
 if printf '%s' "$pv_out" | grep -q 'SOURCE       aaaaaaaaaaaaaaaaaaaaaaaa…'; then
     pass "preview truncates a long source (fallback layout)"
@@ -153,18 +179,18 @@ else fail "preview fallback layout leaked a long source"; fi
 if printf '%s' "$pv_out" | grep -q 'aaaaaaaaaaaaaaaaaaaaaaaaa'; then
     fail "preview fallback layout exceeded the column bound"
 else pass "no over-length source run in fallback layout"; fi
-pv_out=$(COLUMNS=60 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID=1 bash "$THEME" preview long-src 2>/dev/null)
+pv_out=$(COLUMNS=60 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID=1 bash "$THEME" preview long-src 2>/dev/null)
 if printf '%s' "$pv_out" | grep -q 'aaaaaaaaaaaaaaaaaaaaaaaa…'; then
     pass "preview truncates a long source (image layout)"
 else fail "preview image layout leaked a long source"; fi
-lv_out=$(COLUMNS=100 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" list -v 2>/dev/null)
+lv_out=$(COLUMNS=100 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" list -v 2>/dev/null)
 if printf '%s' "$lv_out" | grep -q 'aaaaaaaaa…  png'; then
     pass "list -v bounds the SOURCE field"
 else fail "list -v SOURCE field shifted later columns"; fi
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' |
     base64 -d >"$lib/ctrl-src.png"
 xattr -w theme.source "$(printf 'bad\nline\airl')" "$lib/ctrl-src.png" 2>/dev/null
-pv_out=$(COLUMNS=80 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview ctrl-src 2>/dev/null)
+pv_out=$(COLUMNS=80 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" preview ctrl-src 2>/dev/null)
 if printf '%s' "$pv_out" | grep -q 'SOURCE       badlineirl'; then
     pass "control bytes in the source xattr are stripped"
 else fail "control bytes reached the preview table"; fi
@@ -204,8 +230,14 @@ for a in "$@"; do
 done
 cfg=""
 [ "$kdash" = 1 ] && cfg=$(cat)
-case "$cfg" in *stub-sentinel-key*) printf 'KEYTO %s\n' "$url" >>"$CURL_LOG" ;; esac
+case "$cfg" in
+*stub-sentinel-key*) printf 'KEYTO %s\n' "$url" >>"$CURL_LOG" ;;
+*stub-user-token*) printf 'TOKTO %s\n' "$url" >>"$CURL_LOG" ;;
+esac
 case "$url" in
+*api.unsplash.com/photos/stub123/download*)
+    printf '{"url": "%s"}' "${STUB_ENTITLED:-https://delivery.unsplash.com/entitled-bytes}"
+    ;;
 *api.unsplash.com/photos*)
     STUB_DESC="${STUB_DESC:-stub photo of a boundary test}" \
     STUB_DL="${STUB_DL:-https://api.unsplash.com/photos/stub123/download}" \
@@ -215,11 +247,12 @@ sys.stdout.write(json.dumps({
     "id": "stub123", "slug": "stub-photo-stub1234567",
     "alt_description": os.environ["STUB_DESC"],
     "width": 3840, "height": 2160,
-    "urls": {"raw": "https://img.invalid/raw", "full": "https://img.invalid/full"},
+    "urls": {"raw": os.environ.get("STUB_RAW", "https://img.invalid/raw"),
+             "full": "https://img.invalid/full"},
     "links": {"download_location": os.environ["STUB_DL"]},
     "user": {"name": os.environ["STUB_WHO"]}}))'
     ;;
-*img.invalid/*)
+*img.invalid/* | *plus.unsplash.com/* | *delivery.unsplash.com/*)
     printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5CYII=' |
         base64 -d >"${out:?}"
     ;;
@@ -227,10 +260,21 @@ esac
 exit 0
 EOS
 chmod +x "$stubdir/curl"
+# Keychain stand-in: the fixture must be HERMETIC — a developer's real stored
+# tokens must never steer these tests. (They did once: a live
+# unsplash-user-token turned every Client-ID report count to zero.)
+printf '#!/bin/bash\nexit 1\n' >"$stubdir/security"
+chmod +x "$stubdir/security"
 
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+# The credential environment is stated in full, never inherited: the Keychain
+# is stubbed above, but an exported UNSPLASH_USER_TOKEN in the developer's own
+# shell would otherwise send every Client-ID case down the Bearer path and the
+# report counts to zero — the same accident, one door along. STUB_TOKEN is the
+# ONLY way a token enters these runs.
 run_stub() { CURL_LOG="$1" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
-    WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
+    UNSPLASH_USER_TOKEN="${STUB_TOKEN:-}" UNSPLASH_SECRET_KEY="" \
+    THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
 
 goodlog="$fixture/curl-good.log"; : >"$goodlog"
 check  "unsplash photo-page URL accepted"      0 run_stub "$goodlog" unsplash https://unsplash.com/photos/winged-slug-coy_MhYMLHs
@@ -242,7 +286,10 @@ if grep -q 'stub-sentinel-key' "$goodlog"; then fail "key leaked into curl argv"
 if grep 'api\.unsplash\.com/photos/winged-slug' "$goodlog" | grep -q '^ARGV: -fsLg '; then
     pass "curl globbing off on the API request"
 else fail "API request missing -g (globoff)"; fi
-exists "photo saved under its description"     yes "$lib/stub-photo-of-a-boundary-test.png"
+# Downloads route into their provider subfolder (SAVE_SUBDIR): unsplash
+# fetches land in unsplash/, and the root stays clean.
+exists "photo saved under its description"     yes "$lib/unsplash/stub-photo-of-a-boundary-test.png"
+exists "unsplash download not at library root" no  "$lib/stub-photo-of-a-boundary-test.png"
 
 evillog="$fixture/curl-evil.log"; : >"$evillog"
 check  "lookalike host refused"                1 run_stub "$evillog" unsplash https://evilunsplash.com/photos/x
@@ -288,6 +335,35 @@ if [ "$tabreport" = 1 ] && [ "$tabkeys" = 2 ]; then
 else fail "crafted description shifted the report ($tabreport legit of $tabkeys authenticated calls)"; fi
 unset STUB_DESC
 
+# --- Unsplash+ entitlement: with an account token the binary comes from the
+# --- download endpoint's ANSWER (the clean file), that call IS the report
+# --- (never two), and a hostile answer cannot choose the download host ------
+# shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+run_stub_tok() { STUB_TOKEN=stub-user-token run_stub "$@"; }
+STUB_RAW="https://plus.unsplash.com/premium-raw-stub"
+STUB_DESC="premium boundary test"
+export STUB_RAW STUB_DESC
+premlog="$fixture/curl-prem.log"; : >"$premlog"
+check  "premium + account token saves"         0 run_stub_tok "$premlog" unsplash https://unsplash.com/photos/premium-slug-abcdef12345
+exists "premium photo saved"                   yes "$lib/unsplash/premium-boundary-test.png"
+if grep -q '^ARGV: .*delivery\.unsplash\.com/entitled-bytes' "$premlog" &&
+    ! grep -q '^ARGV: .*plus\.unsplash\.com' "$premlog"; then
+    pass "binary fetched from the entitled answer, not the watermarked raw"
+else fail "entitled download did not replace the raw rendition"; fi
+tokdl=$(grep -c '^TOKTO https://api\.unsplash\.com/photos/stub123/download$' "$premlog")
+if [ "$tokdl" = 1 ]; then pass "entitled call doubles as the report — exactly one"
+else fail "expected 1 authenticated download call, saw $tokdl"; fi
+STUB_ENTITLED="https://evil.invalid/steal-the-fetch"
+export STUB_ENTITLED
+premevil="$fixture/curl-premevil.log"; : >"$premevil"
+check  "hostile entitled answer tolerated"     0 run_stub_tok "$premevil" unsplash https://unsplash.com/photos/premium-slug-abcdef12345
+if grep '^ARGV: ' "$premevil" | grep -q 'evil\.invalid'; then
+    fail "a hostile entitled URL was fetched"
+elif grep -q '^ARGV: .*plus\.unsplash\.com' "$premevil"; then
+    pass "hostile entitled URL refused; fell back to the standard rendition"
+else fail "hostile entitled URL: no fallback fetch happened"; fi
+unset STUB_ENTITLED STUB_RAW STUB_DESC
+
 STUB_DL="https://evil.invalid/dl"
 export STUB_DL
 evildllog="$fixture/curl-evildl.log"; : >"$evildllog"
@@ -296,6 +372,73 @@ if grep '^KEYTO ' "$evildllog" | grep -qv '^KEYTO https://api\.unsplash\.com/'; 
     fail "key followed a non-api download_location"
 else pass "non-api download_location never receives the key"; fi
 unset STUB_DL
+
+# --- a credential can never inject a curl CONFIG DIRECTIVE ------------------
+# Keeping credentials off argv is only half the problem. They reach curl as
+# `-K -` config lines, and that config is a GRAMMAR: `directive = "value"`.
+# A quote inside a value ENDS it, and a newline then begins a NEW directive —
+# so a credential carrying `"\nurl = "http://attacker/` makes curl perform a
+# SECOND transfer to a target the tool never chose, carrying the Authorization
+# header with it. Every credential SOURCE is gated at the point it enters the
+# grammar, so a hostile value must die with ZERO transfers.
+#
+# The stub counts transfers instead of answering: a passing run is one that
+# never invokes it at all.
+credbin="$fixture/credbin"
+mkdir -p "$credbin"
+cat >"$credbin/curl" <<'EOS'
+#!/bin/sh
+# Counts invocations. Answers nothing: any call at all is a failed defence.
+printf 'TRANSFER %s\n' "$*" >>"${CURL_CALL_LOG:?}"
+exit 0
+EOS
+chmod +x "$credbin/curl"
+printf '#!/bin/sh\nexit 0\n' >"$credbin/open"; chmod +x "$credbin/open"
+# Hermetic, for the same reason the API stub is: a real stored token in the
+# developer's Keychain would answer unsplash_user_token() and send the
+# access-key cases down the Bearer path, so they would stop testing the key.
+printf '#!/bin/sh\nexit 1\n' >"$credbin/security"; chmod +x "$credbin/security"
+credlog="$fixture/curl-cred.log"
+# A quoted value plus a newline plus a second directive — the exact shape.
+hostile_cred='goodtoken"
+url = "http://127.0.0.1:9/injected-second-transfer'
+cred_run() { # $1 label, $2.. env assignments then -- then argv
+    local label="$1"; shift
+    local envs=() ; while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
+    : >"$credlog"
+    local out
+    out=$(env "${envs[@]}" CURL_CALL_LOG="$credlog" PATH="$credbin:$PATH" \
+        THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
+        bash "$THEME" "$@" 2>&1)
+    local n; n=$(wc -l <"$credlog" | tr -d ' ')
+    if [ "$n" = 0 ]; then pass "$label reaches curl zero times"
+    else fail "$label produced $n curl transfer(s) — config-directive injection"; fi
+    case "$out" in
+    *"cannot occur in an Unsplash credential"*) pass "$label is refused by the credential grammar" ;;
+    *) fail "$label was not refused by the credential grammar" ;;
+    esac
+}
+cred_run "a quote+newline account token" \
+    "UNSPLASH_USER_TOKEN=$hostile_cred" UNSPLASH_ACCESS_KEY=validkey -- unsplash random
+cred_run "a quote+newline access key" \
+    UNSPLASH_USER_TOKEN= "UNSPLASH_ACCESS_KEY=$hostile_cred" -- unsplash random
+cred_run "a quote+newline token on status" \
+    "UNSPLASH_USER_TOKEN=$hostile_cred" UNSPLASH_ACCESS_KEY=validkey -- unsplash status
+cred_run "a quote+newline key on the auth exchange" \
+    "UNSPLASH_ACCESS_KEY=$hostile_cred" UNSPLASH_SECRET_KEY=sec -- unsplash auth
+cred_run "a quote+newline app secret" \
+    UNSPLASH_ACCESS_KEY=validkey "UNSPLASH_SECRET_KEY=$hostile_cred" -- unsplash auth
+# The gate must not swallow credentials that are merely unusual: every
+# character below occurs in real Unsplash keys and tokens. A refusal here
+# would make the control useless in practice, which is how such gates get
+# removed later.
+: >"$credlog"
+env UNSPLASH_USER_TOKEN='abc-DEF_123.tok~x+y/z=' UNSPLASH_ACCESS_KEY=validkey \
+    CURL_CALL_LOG="$credlog" PATH="$credbin:$PATH" THEME_WALLPAPER_DIR="$lib" \
+    THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" unsplash random >/dev/null 2>&1
+if [ "$(wc -l <"$credlog" | tr -d ' ')" -ge 1 ]; then
+    pass "a legitimate token is not refused by the grammar"
+else fail "the credential grammar refused a legitimate token"; fi
 
 # --- `theme list` colorscheme column: reports the cache, never guesses ------
 # The column claims "the scheme THIS wallpaper derived", and pywal's cache
@@ -362,8 +505,12 @@ printf '{\n    "wallpaper": "%s",\n    "colors": {"color0": "#0102", "color1": "
 
 listout="$fixture/list.out"; listerr="$fixture/list.err"
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_list() { WAL_CACHE="$walcache" COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
-    bash "$THEME" list >"$listout" 2>"$listerr"; }
+# --all, because these assertions are about scheme ATTRIBUTION, not paging:
+# this library holds more wallpapers than `list` shows by default, so without
+# it the rows under test fall off the end and the checks silently stop
+# checking (which is worse than failing — they would pass on an empty grep).
+run_list() { WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    bash "$THEME" list --all >"$listout" 2>"$listerr"; }
 row() { grep "^  $1  *" "$listout"; }   # one listing row, by its exact title
 owns() { # $1 description, $2 title, $3 own rgb, $4 rgb it must never show
     local r
@@ -389,6 +536,166 @@ else pass "unapplied wallpaper lists an honest dash"; fi
 if row 'scheme-bad' | grep -q '48;2;' || [ -s "$listerr" ]; then
     fail "a corrupt cache entry produced a swatch or an error"
 else pass "corrupt cache entry degrades to a dash, silently"; fi
+
+# --- the DEFAULT listing is bounded: newest 10, honestly labelled -----------
+# run_list above passes --all precisely because of this bound — without it the
+# ownership rows fall off the listing. This library holds 12+ images, so a
+# default run must stop at 10 and SAY so in the footer.
+if WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+    bash "$THEME" list 2>/dev/null | grep -q 'newest 10 of [0-9]* — more:'; then
+    pass "default list bounds to the newest 10 with an honest footer"
+else fail "default list bound or footer missing (LIST_N default drifted?)"; fi
+# The descriptor-bound saver, lifted out of the tool and driven directly:
+# these cases are about the trust decisions it makes before it writes. An
+# implementation without such a saver cannot make them at all, so its absence
+# fails these cases rather than skipping them.
+swapsrc=$(sed -n "/^SAVE_PY='$/,/^'$/p" "$THEME" | sed '1d;$d')
+
+# --- the pathname is only as good as its WHOLE chain of directories --------
+# Binding the write to a descriptor protects the write. It does not protect
+# the pathname handed back afterwards, which the xattr, the size probe, pywal
+# and the desktop setter all reopen — and replacing ANY component retargets
+# it. Review swapped the LIBRARY entry (not the provider entry) through a
+# world-writable grandparent and made the returned path read attacker bytes,
+# so the audit has to walk the whole canonical chain, and this case plants
+# the weakness one level further out than the provider mutants above.
+chaindir="$fixture/chain"; mkdir -p "$chaindir/parent/lib/unsplash"
+chmod 0777 "$chaindir/parent"
+printf 'x' >"$chaindir/src.png"
+chainout=$(python3 -c "$swapsrc" "$chaindir/src.png" "$chaindir/parent/lib" unsplash pic png 2>&1)
+chmod 0755 "$chaindir/parent"
+case "$chainout" in
+ERR*group-\ or\ world-writable*) pass "a world-writable ancestor is refused, not just a bad provider folder" ;;
+*) fail "a world-writable ancestor was accepted: $chainout" ;;
+esac
+exists "and nothing was written under it"      no  "$chaindir/parent/lib/unsplash/pic.png"
+
+# --- a mode of 0755 does not mean only you can write ------------------------
+# macOS ACLs grant write independently of the POSIX mode: the mode still reads
+# 0755 while another principal holds add_file/delete_child, which is exactly
+# enough to replace the provider entry. This repo already treats an extended
+# ACL as a writable principal in the compinit control; the save path must too.
+# The DENY case matters just as much as the ALLOW one — every macOS home
+# carries `group:everyone deny delete`, so a check that flags any ACE at all
+# would refuse every ordinary account, and would be removed within a week.
+acldir="$fixture/acl"; mkdir -p "$acldir/lib/unsplash"
+printf 'x' >"$acldir/src.png"
+if chmod +a "everyone allow add_file,delete_child" "$acldir/lib" 2>/dev/null; then
+    aclout=$(python3 -c "$swapsrc" "$acldir/src.png" "$acldir/lib" unsplash pic png 2>&1)
+    case "$aclout" in
+    ERR*ACL\ granting*) pass "an ACL granting another principal write is refused" ;;
+    *) fail "an ACL-writable library was accepted: $aclout" ;;
+    esac
+    exists "and nothing was written into it"   no  "$acldir/lib/unsplash/pic.png"
+    chmod -a "everyone allow add_file,delete_child" "$acldir/lib" 2>/dev/null
+    # A DENY ace restricts; it must NOT be mistaken for a grant.
+    denydir="$fixture/acl-deny"; mkdir -p "$denydir/lib"
+    printf 'x' >"$denydir/src.png"
+    chmod +a "everyone deny delete" "$denydir/lib" 2>/dev/null
+    denyout=$(python3 -c "$swapsrc" "$denydir/src.png" "$denydir/lib" unsplash pic png 2>&1)
+    chmod -a "everyone deny delete" "$denydir/lib" 2>/dev/null
+    case "$denyout" in
+    SAVED*) pass "a DENY ace is not mistaken for a write grant" ;;
+    *) fail "a benign deny-delete ACL blocked the save: $denyout" ;;
+    esac
+    # writesecurity is ACL ADMINISTRATION, not a direct write. A predicate
+    # that lists only the direct rights certifies this directory, and the
+    # principal then rewrites the ACL to give itself add_file a moment later.
+    wsdir="$fixture/acl-ws"; mkdir -p "$wsdir/lib"
+    printf 'x' >"$wsdir/src.png"
+    chmod +a "everyone allow writesecurity" "$wsdir/lib" 2>/dev/null
+    wsout=$(python3 -c "$swapsrc" "$wsdir/src.png" "$wsdir/lib" unsplash pic png 2>&1)
+    chmod -a "everyone allow writesecurity" "$wsdir/lib" 2>/dev/null
+    case "$wsout" in
+    ERR*ACL\ granting*writesecurity*) pass "an ACL granting writesecurity is refused (it can grant itself the rest)" ;;
+    *) fail "a writesecurity-granting library was accepted: $wsout" ;;
+    esac
+    exists "and nothing was written into the writesecurity library" no "$wsdir/lib/unsplash/pic.png"
+else
+    # NOT a pass. `chmod +a` is unavailable, so the darwin-native cases could
+    # not run; the forced-platform cases immediately below carry this boundary
+    # on every platform, which is why a skip here certifies nothing.
+    echo "SKIP  darwin-native ACL cases: this platform has no chmod +a"
+fi
+
+# --- the ACL audit has to hold where the interrogator is MISSING ------------
+# Review forced the non-darwin branch with getfacl absent and the shipped
+# helper failed OPEN: the mode check alone governed, which is the check that
+# was already shown to be insufficient, and the documented Ubuntu install path
+# does not pull in `acl`. These three cases run on every platform — no
+# chmod +a, no skip — so this boundary is never certified by a skipped mutant.
+cat >"$fixture/acl-forced.py" <<'PYFORCE'
+import os, sys, shutil
+sys.platform = "linux"
+if os.environ.get("FORCE_NO_GETFACL"):
+    _w = shutil.which
+    shutil.which = lambda n, *a, **k: None if n == "getfacl" else _w(n, *a, **k)
+exec(compile(open(os.environ["SAVE_PY_FILE"]).read(), "SAVE_PY", "exec"))
+PYFORCE
+printf '%s' "$swapsrc" >"$fixture/save-py.txt"
+fdir="$fixture/facl"; mkdir -p "$fdir/lib" "$fdir/bin"
+printf 'x' >"$fdir/src.png"
+
+nofacl=$(SAVE_PY_FILE="$fixture/save-py.txt" FORCE_NO_GETFACL=1 \
+    python3 "$fixture/acl-forced.py" "$fdir/src.png" "$fdir/lib" unsplash a png 2>&1)
+case "$nofacl" in
+ERR*cannot\ be\ audited\ for\ ACLs*getfacl*) pass "off macOS, a missing getfacl refuses the save with an actionable error" ;;
+*) fail "a missing ACL interrogator failed open: $nofacl" ;;
+esac
+exists "and nothing was written without an ACL audit" no "$fdir/lib/unsplash/a.png"
+
+printf '#!/bin/sh\necho "group:staff:rwx"\n' >"$fdir/bin/getfacl"; chmod +x "$fdir/bin/getfacl"
+gfgrant=$(PATH="$fdir/bin:$PATH" SAVE_PY_FILE="$fixture/save-py.txt" \
+    python3 "$fixture/acl-forced.py" "$fdir/src.png" "$fdir/lib" unsplash b png 2>&1)
+case "$gfgrant" in
+ERR*ACL\ granting*) pass "off macOS, a getfacl-reported group write grant is refused" ;;
+*) fail "a POSIX ACL write grant was accepted: $gfgrant" ;;
+esac
+
+printf '#!/bin/sh\necho "user::rwx"\necho "group::r-x"\necho "other::r-x"\n' >"$fdir/bin/getfacl"
+gfclean=$(PATH="$fdir/bin:$PATH" SAVE_PY_FILE="$fixture/save-py.txt" \
+    python3 "$fixture/acl-forced.py" "$fdir/src.png" "$fdir/lib" unsplash c png 2>&1)
+case "$gfclean" in
+SAVED*) pass "off macOS, an ACL with no foreign write grant still saves" ;;
+*) fail "a clean POSIX ACL blocked the save: $gfclean" ;;
+esac
+
+# --- the contrast floor must actually be reached, on ANY background --------
+# The endpoint (white or black) was chosen by background LIGHTNESS, which is
+# the wrong test: on a mid-tone background the lighter side can be the weaker
+# one, and nothing checked the result afterwards. Review measured an accent
+# rewritten to #ffffff at 2.32:1 under a 4.5 request, while black would have
+# given 9.04:1. So this case MEASURES the output rather than trusting it.
+floorpy=$(sed -n "/^PALETTE_FLOOR_PY='/,/^'/p" "$THEME" |
+    sed "1s/^PALETTE_FLOOR_PY='//; \$s/^'//")
+fdir="$fixture/floor"; mkdir -p "$fdir"
+printf '#aaaaaa\n#777777\n' >"$fdir/colors"
+for _ in $(seq 2 15); do printf '#303030\n' >>"$fdir/colors"; done
+printf 'foreground #777777\ncolor0 #aaaaaa\ncolor1 #777777\n' >"$fdir/colors-kitty.conf"
+WAL_DIR="$fdir" OPACITY=1 WP_AVG=aaaaaa FLOOR=4.5 python3 -c "$floorpy" >/dev/null 2>&1
+floorres=$(sed -n 2p "$fdir/colors")
+floormeas=$(FLOORED="$floorres" python3 -c '
+import os
+def rgb(h):
+    h = h.lstrip("#"); return [int(h[i:i+2], 16) for i in (0, 2, 4)]
+def lum(c):
+    def ch(x):
+        x /= 255
+        return x/12.92 if x <= 0.03928 else ((x+0.055)/1.055)**2.4
+    return 0.2126*ch(c[0]) + 0.7152*ch(c[1]) + 0.0722*ch(c[2])
+a, b = lum(rgb(os.environ["FLOORED"])), lum(rgb("#aaaaaa"))
+hi, lo = max(a, b), min(a, b)
+print("%.3f %d" % ((hi+0.05)/(lo+0.05), 1 if a < b else 0))
+' 2>/dev/null)
+floorratio=${floormeas%% *}; floordark=${floormeas##* }
+if [ -n "$floorratio" ] && [ "${floorratio%%.*}" -ge 4 ] &&
+    awk "BEGIN{exit !($floorratio >= 4.5)}"; then
+    pass "a mid-tone background still reaches the requested floor ($floorratio:1)"
+else fail "mid-tone floor not reached: got ${floorratio:-none}:1 against 4.5"; fi
+if [ "$floordark" = 1 ]; then
+    pass "and it moved to the DARKER side, the reachable one here"
+else fail "the floor moved toward the endpoint that cannot reach it"; fi
+
 # --- a DANGLING symlink is an occupied name, not a free one -----------------
 # `[ -e ]` follows symlinks, so a dangling one reads as a vacant slot and the
 # save below lands on its target — outside the library entirely. The download
@@ -406,7 +713,7 @@ exit 0
 EOS
 chmod +x "$urlbin/curl"
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
-run_url() { PATH="$urlbin:$PATH" WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
+run_url() { PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 \
     TMPDIR="$fixture/tmpdir" bash "$THEME" url "$1"; }
 ln -s "$out/redirected.png" "$lib/hijacked.png"
 check  "download onto a hijacked name succeeds" 0 run_url https://img.invalid/hijacked.png
@@ -414,6 +721,131 @@ exists "nothing written through the symlink"   no "$out/redirected.png"
 exists "download landed inside the library"    yes "$lib/hijacked-2.png"
 if [ -L "$lib/hijacked.png" ]; then pass "the hijacking symlink is left alone"
 else fail "the hijacking symlink was replaced or removed"; fi
+
+# --- the PROVIDER SUBDIRECTORY is not a way out of the library -------------
+# The noclobber write defends the leaf and only the leaf. Downloads now land
+# in a per-provider subfolder, which is a PARENT component — and `mkdir -p`
+# is perfectly happy when that last component already exists as a SYMLINK.
+# A pre-planted `unsplash -> elsewhere` would therefore receive every
+# download, outside the library, with no name collision to make it visible.
+# The save must refuse, write nothing anywhere, and leave the planted link
+# untouched for the owner to find.
+symlib="$fixture/subdir-lib"; symout="$fixture/subdir-out"
+mkdir -p "$symlib" "$symout"
+ln -s "$symout" "$symlib/unsplash"
+symerr=$(PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$symlib" THEME_NO_APPLY=1 \
+    TMPDIR="$fixture/tmpdir" bash "$THEME" url https://images.unsplash.com/pic.png 2>&1)
+if [ "$(find "$symout" -type f | wc -l | tr -d ' ')" = 0 ]; then
+    pass "a symlinked provider folder receives nothing"
+else fail "the download escaped through the symlinked provider folder"; fi
+if [ "$(find -P "$symlib" -type f | wc -l | tr -d ' ')" = 0 ]; then
+    pass "and nothing was written into the library either"
+else fail "a file appeared in the library after the refusal"; fi
+if [ -L "$symlib/unsplash" ]; then pass "the planted provider symlink is left alone"
+else fail "the planted provider symlink was replaced or removed"; fi
+case "$symerr" in
+*"refusing to save"*) pass "the refusal says it is refusing to save" ;;
+*) fail "the parent-symlink refusal was silent or unclear" ;;
+esac
+# The same boundary, without a symlink: an ordinary provider folder inside the
+# library must still work, or the check above would be indistinguishable from
+# a tool that simply stopped saving.
+okslib="$fixture/subdir-ok"; mkdir -p "$okslib"
+PATH="$urlbin:$PATH" THEME_WALLPAPER_DIR="$okslib" THEME_NO_APPLY=1 \
+    TMPDIR="$fixture/tmpdir" bash "$THEME" url https://images.unsplash.com/fine.png >/dev/null 2>&1
+exists "an ordinary provider folder still receives the download" yes "$okslib/unsplash/fine.png"
+
+# --- the provider check must BIND to the write, not to a pathname ----------
+# Refusing a symlink that is already there is the easy half. The hard half is
+# a swap DURING the save: rename the checked directory and drop a symlink at
+# the same name, and any implementation that kept only a path string — even a
+# canonicalized one — re-resolves it and writes outside the library. (Review
+# demonstrated exactly that against the pathname version.)
+#
+# The window is opened deterministically rather than raced: the source is a
+# FIFO, so the saver blocks mid-flight, AFTER it has opened and validated the
+# provider directory and BEFORE it writes. The swap happens while it is
+# blocked, which is precisely the check/use boundary.
+swapdir="$fixture/swap"; mkdir -p "$swapdir/lib/unsplash" "$swapdir/outside"
+swapfifo="$swapdir/src.fifo"; rm -f "$swapfifo"; mkfifo "$swapfifo"
+(
+    # Give the saver time to reach its blocking read, then swap the NAME.
+    # The write is backgrounded behind a timeout so a saver that never opens
+    # the FIFO (one without the helper) cannot wedge the suite.
+    sleep 1
+    mv "$swapdir/lib/unsplash" "$swapdir/lib/checked-dir" 2>/dev/null
+    ln -s "$swapdir/outside" "$swapdir/lib/unsplash" 2>/dev/null
+    ( printf '\211PNG\r\n\032\n' >"$swapfifo" ) &
+    fw=$!
+    ( sleep 5; kill $fw 2>/dev/null ) 2>/dev/null &
+    wait $fw 2>/dev/null
+) &
+swapper=$!
+if [ -n "$swapsrc" ]; then
+    swapout=$(python3 -c "$swapsrc" "$swapfifo" "$swapdir/lib" unsplash pic png 2>&1)
+else
+    swapout="no descriptor-bound saver in this implementation"
+    # Unblock the writer so the suite proceeds.
+    ( timeout 6 cat "$swapfifo" >/dev/null 2>&1 || true ) &
+fi
+wait $swapper 2>/dev/null
+if [ "$(find "$swapdir/outside" -type f | wc -l | tr -d ' ')" = 0 ]; then
+    pass "a mid-save provider swap writes nothing outside the library"
+else fail "the check/use swap redirected the write outside the library"; fi
+if [ -f "$swapdir/lib/checked-dir/pic.png" ]; then
+    pass "the bytes land in the directory that was actually checked"
+else fail "the write did not land in the checked directory"; fi
+case "$swapout" in
+*"$swapdir/lib/checked-dir/pic.png"*)
+    pass "the returned path names the checked directory, not the swapped name" ;;
+*"changed underneath the save"*)
+    pass "or the moved path is refused rather than handed onward" ;;
+*) fail "a path that moved underneath the save was handed back: $swapout" ;;
+esac
+if [ "$(cat "$swapdir/lib/checked-dir/pic.png" 2>/dev/null)" = "$(cat "$swapfifo.copy" 2>/dev/null)" ] ||
+    [ -f "$swapdir/lib/checked-dir/pic.png" ]; then
+    pass "the returned path does not read the attacker file"
+else fail "the returned path resolved outside the checked directory"; fi
+
+# The REUSE arm is a separate exit and needs its own mutant. When the name is
+# already taken by byte-identical content the saver returns that file instead
+# of writing — and review showed this arm handed back a bare pathname while
+# the create arm had already been bound, so a swap made the caller read the
+# ATTACKER's copy of the same name while the checked file sat untouched.
+# Same deterministic window, same swap, identical bytes on both sides.
+reudir="$fixture/reuse-swap"; mkdir -p "$reudir/lib/unsplash" "$reudir/outside"
+printf 'trusted-bytes' >"$reudir/lib/unsplash/pic.png"
+printf 'attacker-bytes' >"$reudir/outside/pic.png"
+reufifo="$reudir/src.fifo"; rm -f "$reufifo"; mkfifo "$reufifo"
+(
+    sleep 1
+    mv "$reudir/lib/unsplash" "$reudir/lib/checked-dir" 2>/dev/null
+    ln -s "$reudir/outside" "$reudir/lib/unsplash" 2>/dev/null
+    ( printf 'trusted-bytes' >"$reufifo" ) &
+    fw=$!
+    ( sleep 5; kill $fw 2>/dev/null ) 2>/dev/null &
+    wait $fw 2>/dev/null
+) &
+reuswapper=$!
+if [ -n "$swapsrc" ]; then
+    reuout=$(python3 -c "$swapsrc" "$reufifo" "$reudir/lib" unsplash pic png 2>&1)
+else
+    reuout="no descriptor-bound saver in this implementation"
+    ( timeout 6 cat "$reufifo" >/dev/null 2>&1 || true ) &
+fi
+wait $reuswapper 2>/dev/null
+reupath=${reuout#* }
+case "$reuout" in
+ERR*) pass "reuse under a swap is refused"
+      reupath="" ;;
+*)    pass "reuse under a swap returned a path to check" ;;
+esac
+if [ -z "$reupath" ] || [ "$(cat "$reupath" 2>/dev/null)" = "trusted-bytes" ]; then
+    pass "the reused path reads the CHECKED file, never the attacker copy"
+else fail "the reuse arm handed back a path reading: $(cat "$reupath" 2>/dev/null)"; fi
+if [ "$(cat "$reudir/lib/checked-dir/pic.png" 2>/dev/null)" = "trusted-bytes" ]; then
+    pass "the checked file itself is untouched by the swap"
+else fail "the checked file was modified during the reuse swap"; fi
 # A symlink to an IDENTICAL in-library file is still not that file. `-f`
 # follows symlinks, so without the `-L` arm the alias hashes equal and gets
 # adopted as the saved wallpaper — the library would then hold a wallpaper
@@ -440,7 +872,7 @@ else fail "free-name download did not produce a regular library file"; fi
 oscname="osc52-safe$(printf '\033]52;c;U0FGRQ==\007')"
 printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/$oscname.png"
 osc_open=$(printf '\033]')
-pv_osc=$(COLUMNS=120 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+pv_osc=$(COLUMNS=120 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
     bash "$THEME" preview osc52- 2>/dev/null)
 if printf '%s' "$pv_osc" | grep -qF -- "$osc_open"; then
     fail "preview emitted a filename's OSC sequence"
@@ -451,7 +883,7 @@ else pass "preview never emits a filename's OSC sequence"; fi
 if printf '%s' "$pv_osc" | grep -q 'osc52-safe'; then
     pass "preview still shows the printable part of the title"
 else fail "preview dropped the whole title instead of its control bytes"; fi
-lv_osc=$(COLUMNS=200 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+lv_osc=$(COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
     bash "$THEME" list 2>/dev/null)
 if printf '%s' "$lv_osc" | grep -qF -- "$osc_open"; then
     fail "list emitted a filename's OSC sequence"
@@ -465,7 +897,7 @@ srccase() { # $1 description, $2 basename, $3 theme.source value, $4 expected la
     local got
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$lib/$2.png"
     xattr -w theme.source "$3" "$lib/$2.png" 2>/dev/null
-    got=$(COLUMNS=120 WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
+    got=$(COLUMNS=120 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 KITTY_WINDOW_ID='' \
         bash "$THEME" preview "$2" 2>/dev/null | sed -n 's/^ *SOURCE  *//p')
     if [ "$got" = "$4" ]; then pass "$1"; else fail "$1 (got '$got', wanted '$4')"; fi
 }
@@ -527,7 +959,7 @@ sweep_all="$fixture/sweep.out"; : >"$sweep_all"
 sweep_bad=""
 sweep() { # $@ = theme arguments; records output, never fails the run
     local o
-    o=$(WALLPAPER_DIR="$sweeplib" WAL_CACHE="$sweepcache" THEME_NO_APPLY=1 \
+    o=$(THEME_WALLPAPER_DIR="$sweeplib" WAL_CACHE="$sweepcache" THEME_NO_APPLY=1 \
         CONFIG_DIR="$sweepcache" KITTY_CONFIG_DIRECTORY="$sweepcache" COLUMNS=120 \
         PATH="$sweepbin:$PATH" \
         TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' bash "$THEME" "$@" 2>&1)
@@ -579,7 +1011,7 @@ else fail "sanitizing removed the whole name, not just its control bytes"; fi
 # The sweep above drives COMMANDS. A valid `theme <cmd> --help` takes a
 # different path entirely: usage_cmd's heredocs and usage()'s live header
 # printf directly, so neither passes through note()/die(). Round 12 found
-# WALLPAPER_DIR reaching five heredocs raw, and TERM_PROGRAM/TERM reaching the
+# THEME_WALLPAPER_DIR reaching five heredocs raw, and TERM_PROGRAM/TERM reaching the
 # header raw — environment and configuration data, all of it able to carry an
 # OSC 52 clipboard write. Enumerating those five is exactly how a sixth gets
 # missed, so this drives EVERY valid help path, and `help` itself, rather than
@@ -599,7 +1031,7 @@ help_bad=""
 help_all="$fixture/help.out"; : >"$help_all"
 help_run() { # $1 label, $2 TERM_PROGRAM, $3 TERM, $4… theme arguments
     local o
-    o=$(WALLPAPER_DIR="/nonexistent/hlibSAFE$oscpay" WAL_CACHE="$helpcache" \
+    o=$(THEME_WALLPAPER_DIR="/nonexistent/hlibSAFE$oscpay" WAL_CACHE="$helpcache" \
         CONFIG_DIR="$helpcache" KITTY_CONFIG_DIRECTORY="$helpcache" COLUMNS=120 \
         THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" KITTY_WINDOW_ID='' \
         PATH="$sweepbin:$PATH" TERM_PROGRAM="$2" TERM="$3" \
@@ -636,7 +1068,7 @@ else fail "help sanitizing removed more than the control bytes:$help_missing"; f
 # The kitty hyperlink is the ONE intentional control sequence in this output.
 # A blanket strip over the whole header would pass every assertion above while
 # silently deleting it, so it gets its own direction.
-kittyout=$(WALLPAPER_DIR="$sweeplib" WAL_CACHE="$helpcache" CONFIG_DIR="$helpcache" \
+kittyout=$(THEME_WALLPAPER_DIR="$sweeplib" WAL_CACHE="$helpcache" CONFIG_DIR="$helpcache" \
     KITTY_CONFIG_DIRECTORY="$helpcache" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
     PATH="$sweepbin:$PATH" KITTY_WINDOW_ID=1 bash "$THEME" help 2>&1)
 if printf '%s' "$kittyout" | grep -qF -- "$(printf '\033]8;;https://sw.kovidgoyal.net/kitty/')"; then
@@ -648,8 +1080,13 @@ rm -f "$sweepbin/uname"
 STUB_WHO=$(printf 'Contributor\033]52;c;UkVNT1RF\007')
 export STUB_WHO
 wholog="$fixture/curl-who.log"; : >"$wholog"
+# Client-ID case: the token and secret are pinned empty here too, so this one
+# stays on the Client-ID path even if the global neutralisation above is ever
+# weakened. Belt and braces, because this is the call site review caught.
 who_out=$(CURL_LOG="$wholog" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
-    WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
+    UNSPLASH_SECRET_KEY='' \
+    UNSPLASH_USER_TOKEN='' \
+    THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" \
     bash "$THEME" unsplash https://unsplash.com/photos/whoslug-abcdef12345 2>&1)
 unset STUB_WHO
 if printf '%s' "$who_out" | grep -qF -- "$osc_open"; then

