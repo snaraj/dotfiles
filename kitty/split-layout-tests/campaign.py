@@ -51,9 +51,57 @@ KITTY = '/Applications/kitty.app/Contents/MacOS/kitty'
 # state path as a symlink and redirect what the probe kitten writes. The
 # directory goes away with the process.
 RUNDIR = tempfile.mkdtemp(prefix='kitty-split-lab.')
-atexit.register(shutil.rmtree, RUNDIR, True)
 SOCK_BASE = os.path.join(RUNDIR, 'sock')
 STATE_FILE = os.path.join(RUNDIR, 'state.json')
+
+# ---------------------------------------------------------------- lifecycle
+# Ownership is established HERE, at import, before any code path can spawn.
+# Registering the reaper after the Lab constructor returned left a window in
+# which a signal - or a constructor failure - stranded a kitty with nobody
+# responsible for it; review reproduced exactly that with a SIGTERM during
+# startup. The registry is appended to the instant Popen returns, so there is
+# no moment when a live process is not owned.
+_LIVE: list[subprocess.Popen] = []
+LEAVE_RUNNING = False
+
+
+def _reap() -> None:
+    if LEAVE_RUNNING:
+        return
+    for p in list(_LIVE):
+        if p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        try:
+            _LIVE.remove(p)
+        except ValueError:
+            pass
+
+
+def _cleanup_rundir() -> None:
+    # A deliberately retained kitty keeps its socket: removing RUNDIR while
+    # the process lives would strand an unreachable minimized window, which
+    # is a worse outcome than either honest one.
+    if LEAVE_RUNNING:
+        return
+    shutil.rmtree(RUNDIR, True)
+
+
+# LIFO: rundir registered first so it runs LAST, after the reaper has killed
+# the processes that own the sockets inside it.
+atexit.register(_cleanup_rundir)
+atexit.register(_reap)
+for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    # Turn each into SystemExit so the atexit chain above always runs; a bare
+    # SIGTERM would kill the interpreter outright and skip it entirely.
+    signal.signal(_sig, lambda s, _f: sys.exit(128 + s))
 DRIFT_TOL = 48          # I1/I2/I4 per-edge drift tolerance (px)
 OVERLAP_TOL = 4         # I3 border-width overlap tolerance (px)
 MIN_SIZE = 5            # I3 minimum window extent (px)
@@ -89,7 +137,15 @@ class Lab:
         self.proc: subprocess.Popen | None = None
         self.verbose = verbose
         self.restarts = 0
-        self.ensure_kitty()
+        # A constructor that spawns must also clean up after itself when it
+        # fails: raising out of here leaves no object for anyone to call
+        # kill_kitty on, so the kitty would only be reaped by the registry at
+        # exit - and not at all if the failure escaped before registration.
+        try:
+            self.ensure_kitty()
+        except BaseException:
+            self.kill_kitty()
+            raise
 
     # -- process lifecycle ------------------------------------------------
     def find_socket(self) -> str | None:
@@ -121,6 +177,11 @@ class Lab:
                     self.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
+        if self.proc is not None:
+            try:
+                _LIVE.remove(self.proc)
+            except ValueError:
+                pass
         self.proc = None
         # Fallback only for a kitty that outlived its handle. The selector is
         # the per-run socket path, which is unique to this process.
@@ -146,6 +207,8 @@ class Lab:
                  '--listen-on', 'unix:' + SOCK_BASE,
                  '--start-as=minimized'],
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Owned before the next line can raise or a signal can land.
+            _LIVE.append(self.proc)
             for _ in range(100):
                 time.sleep(0.2)
                 self.sock_path = self.find_socket()
@@ -601,21 +664,21 @@ def main():
     ap.add_argument('--log', default=os.path.join(LAB, 'campaign.log'))
     ap.add_argument('--restart', action='store_true',
                     help='kill any running lab kitty first (needed after editing the kitten)')
-    ap.add_argument('--leave-running', action='store_true')
+    ap.add_argument('--leave-running', action='store_true',
+                    help='keep the lab kitty and its socket after the run, '
+                         'and print how to drive and kill it')
     args = ap.parse_args()
+
+    # Set BEFORE anything spawns, because the reaper registered at import
+    # consults it. Retaining the process also retains RUNDIR: dropping the
+    # socket out from under a kitty we deliberately kept would leave an
+    # unreachable minimized window, which is neither of the two honest
+    # outcomes.
+    global LEAVE_RUNNING
+    LEAVE_RUNNING = args.leave_running
 
     t0 = time.time()
     lab = Lab()
-    # A crash, a traceback or a ctrl-c must not leave a minimized kitty on
-    # the operator machine - that is how the last stray instance got there.
-    # Scoped to this Lab, so it can only ever reap what this run started.
-    if not args.leave_running:
-        atexit.register(lab.kill_kitty)
-        # SIGTERM kills outright and atexit never runs, so the lab would
-        # outlive the campaign. Turning it into SystemExit lets the same
-        # scoped teardown run for a kill as for a ctrl-c.
-        signal.signal(signal.SIGTERM,
-                      lambda *_: sys.exit('terminated'))
     if args.restart:
         lab.ensure_kitty(force_restart=True)
     logf = open(args.log, 'a')
@@ -646,6 +709,16 @@ def main():
         print('  FAIL %s %s -> %s' % (sid, ','.join(seq), bad if isinstance(bad, str) else ' ;; '.join(bad[:3])))
     if not args.leave_running:
         lab.kill_kitty()
+    else:
+        # Retained on purpose, so say what was retained and how to be rid of
+        # it. A lab nobody can reach or find is the failure mode this branch
+        # used to produce.
+        print('lab kitty left running (pid %s), socket kept at:'
+              % (lab.proc.pid if lab.proc else '?'))
+        print('  %s' % lab.sock_path)
+        print('drive it:  kitten @ --to unix:%s ls' % lab.sock_path)
+        print('kill it:   kill %s' % (lab.proc.pid if lab.proc else '<pid>'))
+        print('its private directory is kept too: %s' % RUNDIR)
     logf.close()
     return 1 if runner.failed else 0
 
