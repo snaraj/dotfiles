@@ -227,9 +227,20 @@ esac
 exit 0
 EOS
 chmod +x "$stubdir/curl"
+# Keychain stand-in: the fixture must be HERMETIC — a developer's real stored
+# tokens must never steer these tests. (They did once: a live
+# unsplash-user-token turned every Client-ID report count to zero.)
+printf '#!/bin/bash\nexit 1\n' >"$stubdir/security"
+chmod +x "$stubdir/security"
 
 # shellcheck disable=SC2317,SC2329  # reached indirectly via check()'s "$@"
+# The credential environment is stated in full, never inherited: the Keychain
+# is stubbed above, but an exported UNSPLASH_USER_TOKEN in the developer's own
+# shell would otherwise send every Client-ID case down the Bearer path and the
+# report counts to zero — the same accident, one door along. STUB_TOKEN is the
+# ONLY way a token enters these runs.
 run_stub() { CURL_LOG="$1" PATH="$stubdir:$PATH" UNSPLASH_ACCESS_KEY=stub-sentinel-key \
+    UNSPLASH_USER_TOKEN="${STUB_TOKEN:-}" UNSPLASH_SECRET_KEY="" \
     THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1 TMPDIR="$fixture/tmpdir" bash "$THEME" "${@:2}"; }
 
 goodlog="$fixture/curl-good.log"; : >"$goodlog"
@@ -321,6 +332,10 @@ exit 0
 EOS
 chmod +x "$credbin/curl"
 printf '#!/bin/sh\nexit 0\n' >"$credbin/open"; chmod +x "$credbin/open"
+# Hermetic, for the same reason the API stub is: a real stored token in the
+# developer's Keychain would answer unsplash_user_token() and send the
+# access-key cases down the Bearer path, so they would stop testing the key.
+printf '#!/bin/sh\nexit 1\n' >"$credbin/security"; chmod +x "$credbin/security"
 credlog="$fixture/curl-cred.log"
 # A quoted value plus a newline plus a second directive — the exact shape.
 hostile_cred='goodtoken"
