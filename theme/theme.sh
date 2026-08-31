@@ -1101,7 +1101,10 @@ cmd_list() {
     total=$(wc -l <"$listfile" | tr -d ' ')
     shown=$total
     [ "$LIST_N" -gt 0 ] && [ "$total" -gt "$LIST_N" ] && shown=$LIST_N
-    head -n "$shown" "$listfile" | backfill_schemes
+    # BSD head rejects `-n 0`, and an empty library is an ordinary first-run
+    # state, not an error — emit nothing rather than a usage complaint.
+    list_rows() { [ "$shown" -gt 0 ] && head -n "$shown" "$listfile"; return 0; }
+    list_rows | backfill_schemes
     cols=${COLUMNS:-$(tput cols 2>/dev/null || printf 100)}
     local pvok="" pvw=0
     [ -n "$VERBOSE" ] && [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitten >/dev/null 2>&1 && { pvok=1; pvw=9; }
@@ -1114,7 +1117,7 @@ cmd_list() {
     else
         printf '  %-*s  %s\n' "$namew" TITLE COLORSCHEME
     fi
-    head -n "$shown" "$listfile" |
+    list_rows |
         while IFS= read -r f; do
             name=$(basename "$f")
             name="${name%.*}"
@@ -1473,10 +1476,10 @@ Apply Commands:
   url             download a direct image URL or Pinterest pin, save it, apply it
 
 Library Commands:
-  list            wallpaper table: title + colorscheme (-v adds source, format, size, date)
+  list, ls        wallpaper table: title + colorscheme (-v adds source, format, size, date)
   preview         one wallpaper up close: picture, colorscheme, title, location
   rename          rename a saved wallpaper, keeping the naming format
-  rm              delete saved wallpapers by name
+  rm, remove      delete saved wallpapers by name
 
 Info Commands:
   status          current theme, color-scheme swatches, variables
@@ -1589,7 +1592,7 @@ theme url <link> [--rotate left|right]
     theme url https://i.pinimg.com/736x/cc/a1/35/cca13….jpg --extend
 EOF
         ;;
-    list) cat <<EOF
+    list | ls) cat <<EOF
 theme list [-v] [-n <count> | --all]
 
   Wallpapers as a table sorted by LATEST ADDED — the newest 10 by
@@ -1647,7 +1650,7 @@ theme rename <wallpaper> <new name…>
     theme rename starry-boat-3840x2160-v0-uyzg0992aegb1 starry boat painting
 EOF
         ;;
-    rm) cat <<EOF
+    rm | remove) cat <<EOF
 theme rm <wallpaper…>
 
   Delete saved wallpapers by name — resolved in $wdir like
@@ -1760,11 +1763,11 @@ unsplash)
     else cmd_unsplash "$*"; fi
     ;;
 url) cmd_url "${2:-}" ;;
-list) cmd_list ;;
+list | ls) cmd_list ;;
 preview) cmd_preview "${2:-}" ;;
 status) cmd_status ;;
 rename) shift; [ -n "${1:-}" ] || die "usage: theme rename <wallpaper> <new name…>"; cmd_rename "$@" ;;
-rm) shift; [ -n "${1:-}" ] || die "usage: theme rm <wallpaper…>"; cmd_rm "$@" ;;
+rm | remove) shift; [ -n "${1:-}" ] || die "usage: theme rm <wallpaper…>"; cmd_rm "$@" ;;
 help | -h | --help) usage ;;
 *) die "unknown command '$1' — run 'theme help' for the list" ;;
 esac
