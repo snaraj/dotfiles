@@ -51,14 +51,27 @@ _zc_strip_cache() {
 # cache has no legitimate use for one, so ANY ACL fails closed — as does an
 # unreadable path. Note the `@` in `ls -l` means extended ATTRIBUTES, not an
 # ACL, so the mode-string marker is NOT a sufficient test.
+# The probe is platform-specific. macOS `ls -lde` prints a numbered ACE line per
+# ACL entry; GNU/coreutils `ls` has NO -e option, so using it unconditionally
+# made the command fail on the documented Ubuntu install and rejected every
+# clean cache — disabling completions and preventing the fast path from ever
+# arming. GNU `ls -l` instead appends '+' to the mode field for an ACL. (The '@'
+# macOS shows means extended ATTRIBUTES and is not an ACL, which is why the
+# marker test cannot be used on darwin.)
 _zc_no_acl() {
     (( $# )) || return 0
-    local out line t
-    out=$(/bin/ls -lde -- "$@" 2>/dev/null) || return 1
-    for line in ${(f)out}; do
-        t=${line//[[:space:]]/}
-        [[ $t == <->:* ]] && return 1
-    done
+    local out line
+    if [[ $OSTYPE == darwin* ]]; then
+        out=$(/bin/ls -lde -- "$@" 2>/dev/null) || return 1
+        for line in ${(f)out}; do
+            [[ ${line//[[:space:]]/} == <->:* ]] && return 1
+        done
+    else
+        out=$(ls -ld -- "$@" 2>/dev/null) || return 1
+        for line in ${(f)out}; do
+            [[ ${${(z)line}[1]} == *+ ]] && return 1
+        done
+    fi
     return 0
 }
 
@@ -188,12 +201,28 @@ if (( _zc_dir_ok )) && _zc_stamp_ok; then
     _zc_age=$(( EPOCHSECONDS - _zc_st[mtime] ))
 fi
 
+# A dump that fails trust is UNLINKED, not merely skipped. `compinit -d` SOURCES
+# an existing dump whenever its header's file count and zsh version still match,
+# and it does not check the dump's permissions — so declining the -C fast path
+# while handing the same file to the full path still executes attacker code
+# appended below a genuine header. Its stamp goes with it.
+if [[ -e $_zc_dump ]] && { ! _zc_trusted $_zc_dump || ! _zc_no_acl $_zc_dump }; then
+    rm -f -- $_zc_dump $_zc_stamp
+    _zc_age=-1
+fi
+
 if (( _zc_age >= 0 && _zc_age < 86400 )) && _zc_trusted $_zc_dump &&
    _zc_no_acl $_zc_dump $_zc_stamp; then
     compinit -C -d $_zc_dump
 else
+    # fixed umask: compinit creates the dump, and under a permissive ambient
+    # umask it would otherwise write a world-writable one that this same file
+    # would then (correctly) unlink on the next startup — after having stamped it.
+    _zc_umask=$(umask)
+    umask 077
     compinit -d $_zc_dump
     _zc_rc=$?
+    umask $_zc_umask
     # compinit returns 0 for a clean audit AND for a filtered one where the user
     # answered "ignore insecure directories and continue": that run drops the bad
     # directory from fpath for the current shell only, sets _comp_secure, and
@@ -202,7 +231,10 @@ else
     # attacker-writable directory. Only a clean audit over a trusted directory
     # arms the stamp; anything else removes it, so no dirty state leaves a usable
     # fast path behind.
-    if (( _zc_rc == 0 && _zc_dir_ok )) && [[ -z ${_comp_secure-} ]]; then
+    # the freshly written dump must itself pass every trust check before it is
+    # certified; a clean audit over a dump we cannot vouch for is not a receipt.
+    if (( _zc_rc == 0 && _zc_dir_ok )) && [[ -z ${_comp_secure-} ]] &&
+       _zc_trusted $_zc_dump && _zc_no_acl $_zc_dump; then
         rm -f -- $_zc_stamp
         print -r -- $_zc_token >| $_zc_stamp && chmod 600 $_zc_stamp
     else
@@ -215,7 +247,7 @@ fi
 # directory now sitting on fpath.
 _zc_pin_auditors
 
-unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_dir_ok _zc_why
+unset _t _zc_dir _zc_dir_phys _zc_dump _zc_stamp _zc_token _zc_f _zc_tmp _zc_age _zc_st _zc_rc _zc_umask _zc_dir_ok _zc_why
 unfunction _zc_trusted _zc_stamp_ok _zc_dir_clean _zc_pin_auditors _zc_strip_cache _zc_no_acl
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'

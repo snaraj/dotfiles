@@ -431,21 +431,67 @@ if [[ $OSTYPE == darwin* ]]; then
           "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "absent"
     rm -rf $s
 
-    # (ii) an ACL-writable .zcompdump reached from a genuinely fresh stamp
+    # (ii) an ACL-writable .zcompdump reached from a genuinely fresh stamp.
+    # The payload is APPENDED so the real header survives: compinit sources an
+    # existing dump only while its header's file count and zsh version match, so
+    # overwriting the dump destroys the very condition the attack needs and the
+    # test would pass for the wrong reason.
     s=$(mktemp -d); mkdir -p $s/zd/completions
     zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
-    check "the clean start armed a real stamp (precondition for the dump case)" \
+    check "the clean start armed a real stamp (precondition for the dump cases)" \
           "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
-    print -r -- 'print ACL-DUMP-RAN' > $s/zd/.zcompdump
+    check "and wrote a dump with a real header" \
+          "$(( $(wc -l < $s/zd/.zcompdump) > 10 ))" "1"
+    print -r -- '' >> $s/zd/.zcompdump
+    print -r -- 'print ACL-DUMP-RAN' >> $s/zd/.zcompdump
     chmod 600 $s/zd/.zcompdump
     chmod +a 'everyone allow write' $s/zd/.zcompdump 2>/dev/null
     out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1" </dev/null 2>&1 )
-    check "an ACL-writable dump is not executed on the -C fast path" \
+    check "an ACL-writable dump with a VALID header is never executed" \
           "$([[ $out == *ACL-DUMP-RAN* ]] && print RAN || print blocked)" "blocked"
     rm -rf $s
 else
     print "SKIP  macOS ACL cases (not darwin)"
 fi
+
+# (ii-b) a mode-writable dump with a valid header, on the FULL compinit path.
+# Failing the -C trust check is not enough: compinit -d sources the same file.
+s=$(mktemp -d); mkdir -p $s/zd/completions
+zsh -f -c "ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
+print -r -- '' >> $s/zd/.zcompdump
+print -r -- 'print MODE-DUMP-RAN' >> $s/zd/.zcompdump
+chmod 0666 $s/zd/.zcompdump
+out=$( zsh -f -c "ZDOTDIR=$s/zd; source $SRC 2>&1" </dev/null 2>&1 )
+check "a 0666 dump with a VALID header is never executed" \
+      "$([[ $out == *MODE-DUMP-RAN* ]] && print RAN || print blocked)" "blocked"
+check "an untrusted dump is unlinked and regenerated safely" \
+      "$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/zd/.zcompdump 2>/dev/null && print \$(( (st[mode] & 8#22) == 0 )) || print missing")" "1"
+rm -rf $s
+
+# (ii-c) the dump this code creates under a permissive umask must be safe.
+# Previously it wrote a world-writable dump and then stamped it as clean.
+s=$(mktemp -d); mkdir -p $s/zd/completions; chmod 755 $s/zd/completions
+zsh -f -c "umask 000; ZDOTDIR=$s/zd; source $SRC" </dev/null >/dev/null 2>&1
+check "a dump created under umask 000 is not group/world-writable" \
+      "$(zsh -fc "zmodload -F zsh/stat b:zstat; typeset -A st; zstat -H st -L -- $s/zd/.zcompdump 2>/dev/null && print \$(( (st[mode] & 8#22) == 0 )) || print missing")" "1"
+check "and that startup still armed the stamp" \
+      "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
+rm -rf $s
+
+# (ii-d) the ACL probe must be platform-correct. GNU/coreutils ls has no -e, so
+# an unconditional `ls -lde` fails there and rejects every clean cache, killing
+# completions on the documented Ubuntu install. Simulated with a GNU-like ls.
+s=$(mktemp -d); mkdir -p $s/zd/completions $s/bin
+print -r -- '#!/bin/sh' > $s/bin/ls
+print -r -- 'for a in "$@"; do case "$a" in -*e*) echo "ls: invalid option -- e" >&2; exit 2;; esac; done' >> $s/bin/ls
+print -r -- 'exec /bin/ls "$@"' >> $s/bin/ls
+chmod +x $s/bin/ls
+out=$( zsh -f -c "OSTYPE=linux-gnu; PATH=$s/bin:\$PATH; ZDOTDIR=$s/zd; source $SRC 2>&1" </dev/null 2>&1 )
+check "a clean cache is NOT rejected on a GNU-ls platform (no -e option)" \
+      "$([[ $out == *ignoring* ]] && print rejected || print accepted)" "accepted"
+check "and the fast path still arms there" \
+      "$([[ -f $s/zd/$STAMP ]] && print armed || print absent)" "armed"
+rm -rf $s
 
 # (iii) an fpath entry spelled differently but resolving to the same directory.
 # A raw string filter let `<cache>/` through and the auditor was pinned from it.
