@@ -243,7 +243,7 @@ fetch_img() {
 #
 # Prints "SAVED <path>", "REUSED <path>", or "ERR <message>".
 SAVE_PY='
-import errno, os, stat, sys
+import errno, os, pwd, re, shutil, stat, subprocess, sys
 src, lib, sub, base, ext = sys.argv[1:6]
 def out(tag, val):
     sys.stdout.write(tag + " " + val + "\n"); raise SystemExit(0)
@@ -262,11 +262,87 @@ def fdpath(fd, fallback):
         return fallback
 # A pathname handed back to the shell is re-resolved by everything that
 # touches it afterwards: the xattr, the size probe, pywal, the desktop
-# setter. None of those can hold a descriptor, so the directories are
-# required to be ones no OTHER principal can rename entries in. Asked of the
-# open descriptor through fstat, this cannot be raced: it describes the
-# object being held, not a name someone may have swapped.
+# setter. None of those can hold a descriptor, so the pathname is only worth
+# what its whole chain of directories is worth. Replacing ANY component
+# retargets it, and replacing a component needs write on that component
+# PARENT - so the audit walks the entire canonical chain to the root, not
+# just the two directories being written into. Review demonstrated both gaps:
+# a 0777 grandparent let the library entry itself be swapped after the save
+# returned, and an ACL write grant passed a mode-only test.
+def acl_grants_write(path):
+    # macOS ACLs grant write independently of the POSIX mode - the mode still
+    # reads 0755 while another principal holds add_file/delete_child. Only
+    # ALLOW entries granting a write-shaped right to someone who is not us
+    # count: a DENY entry restricts rather than grants, and every macOS home
+    # directory carries `group:everyone deny delete`, so treating any ACE at
+    # all as dangerous would refuse every ordinary account. `ls -lde` prints
+    # ACEs as numbered lines; a trailing @ on the mode means extended
+    # ATTRIBUTES, not an ACL, and is irrelevant here.
+    grants = ("write", "append", "delete", "delete_child", "add_file",
+              "add_subdirectory", "chown", "writeattr", "writeextattr")
+    try:
+        if sys.platform == "darwin":
+            me = pwd.getpwuid(os.getuid()).pw_name
+            r = subprocess.run(["/bin/ls", "-lde", path],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return True
+            for ln in r.stdout.splitlines():
+                m = re.match(r"\s*\d+:\s*(.*)$", ln)
+                if not m:
+                    continue
+                ace = m.group(1)
+                parts = ace.split()
+                if "allow" not in parts:
+                    continue
+                who = parts[0]
+                perms = parts[-1].split(",")
+                if not any(g in perms for g in grants):
+                    continue
+                if who in ("user:" + me, me):
+                    continue
+                return True
+            return False
+        g = shutil.which("getfacl")
+        if not g:
+            # Nothing available to interrogate; the mode check governs.
+            return False
+        r = subprocess.run([g, "-cp", path], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return True
+        me = pwd.getpwuid(os.getuid()).pw_name
+        for ln in r.stdout.splitlines():
+            f = ln.strip().split(":")
+            if len(f) < 3 or ln.startswith("#"):
+                continue
+            kind, who, perm = f[0], f[1], f[2]
+            if kind not in ("user", "group") or who == "" or who == me:
+                continue
+            if "w" in perm:
+                return True
+        return False
+    except Exception:
+        return True
+def audit_dir(path, st):
+    if st.st_uid not in (0, os.getuid()):
+        out("ERR", "refusing to save: " + path + " is owned by another user, so it can be replaced underneath the saved path")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        out("ERR", "refusing to save: " + path + " is group- or world-writable, so another principal can replace entries in it")
+    if acl_grants_write(path):
+        out("ERR", "refusing to save: " + path + " has an ACL granting another principal write, which lets them replace entries regardless of the mode")
+def audit_chain(path):
+    # Canonical, so a symlinked component is audited as what it really is.
+    q = os.path.realpath(path)
+    while True:
+        audit_dir(q, os.stat(q))
+        parent = os.path.dirname(q)
+        if parent == q:
+            return
+        q = parent
 def trusted(fd, what):
+    # The two directories actually written into are judged through the OPEN
+    # DESCRIPTOR, which cannot be raced: fstat describes the object being
+    # held, not a name someone may have swapped.
     st = os.fstat(fd)
     if not stat.S_ISDIR(st.st_mode):
         out("ERR", what + " is not a directory")
@@ -282,6 +358,9 @@ except OSError as e:
 trusted(libfd, lib)
 dirfd = libfd
 where = fdpath(libfd, lib)
+# Every ancestor of the library, to the root: the returned pathname is only
+# as trustworthy as the weakest directory on the way to it.
+audit_chain(where)
 if sub:
     # A provider label is ONE component. Anything else is a caller bug, and a
     # caller bug here is a directory traversal.
@@ -302,6 +381,7 @@ if sub:
         out("ERR", "cannot open " + lib + "/" + sub + ": " + e.strerror)
     trusted(dirfd, lib + "/" + sub)
     where = fdpath(dirfd, lib + "/" + sub)
+    audit_chain(where)
 # Every exit that hands back a pathname goes through here: the string must
 # still name the very object the descriptor checked, by identity and not by
 # spelling. This applies to a REUSED file exactly as much as to a created

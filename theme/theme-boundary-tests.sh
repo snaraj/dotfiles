@@ -519,6 +519,64 @@ if WAL_CACHE="$walcache" COLUMNS=200 THEME_WALLPAPER_DIR="$lib" THEME_NO_APPLY=1
     bash "$THEME" list 2>/dev/null | grep -q 'newest 10 of [0-9]* — more:'; then
     pass "default list bounds to the newest 10 with an honest footer"
 else fail "default list bound or footer missing (LIST_N default drifted?)"; fi
+# The descriptor-bound saver, lifted out of the tool and driven directly:
+# these cases are about the trust decisions it makes before it writes. An
+# implementation without such a saver cannot make them at all, so its absence
+# fails these cases rather than skipping them.
+swapsrc=$(sed -n "/^SAVE_PY='$/,/^'$/p" "$THEME" | sed '1d;$d')
+
+# --- the pathname is only as good as its WHOLE chain of directories --------
+# Binding the write to a descriptor protects the write. It does not protect
+# the pathname handed back afterwards, which the xattr, the size probe, pywal
+# and the desktop setter all reopen — and replacing ANY component retargets
+# it. Review swapped the LIBRARY entry (not the provider entry) through a
+# world-writable grandparent and made the returned path read attacker bytes,
+# so the audit has to walk the whole canonical chain, and this case plants
+# the weakness one level further out than the provider mutants above.
+chaindir="$fixture/chain"; mkdir -p "$chaindir/parent/lib/unsplash"
+chmod 0777 "$chaindir/parent"
+printf 'x' >"$chaindir/src.png"
+chainout=$(python3 -c "$swapsrc" "$chaindir/src.png" "$chaindir/parent/lib" unsplash pic png 2>&1)
+chmod 0755 "$chaindir/parent"
+case "$chainout" in
+ERR*group-\ or\ world-writable*) pass "a world-writable ancestor is refused, not just a bad provider folder" ;;
+*) fail "a world-writable ancestor was accepted: $chainout" ;;
+esac
+exists "and nothing was written under it"      no  "$chaindir/parent/lib/unsplash/pic.png"
+
+# --- a mode of 0755 does not mean only you can write ------------------------
+# macOS ACLs grant write independently of the POSIX mode: the mode still reads
+# 0755 while another principal holds add_file/delete_child, which is exactly
+# enough to replace the provider entry. This repo already treats an extended
+# ACL as a writable principal in the compinit control; the save path must too.
+# The DENY case matters just as much as the ALLOW one — every macOS home
+# carries `group:everyone deny delete`, so a check that flags any ACE at all
+# would refuse every ordinary account, and would be removed within a week.
+acldir="$fixture/acl"; mkdir -p "$acldir/lib/unsplash"
+printf 'x' >"$acldir/src.png"
+if chmod +a "everyone allow add_file,delete_child" "$acldir/lib" 2>/dev/null; then
+    aclout=$(python3 -c "$swapsrc" "$acldir/src.png" "$acldir/lib" unsplash pic png 2>&1)
+    case "$aclout" in
+    ERR*ACL\ granting*) pass "an ACL granting another principal write is refused" ;;
+    *) fail "an ACL-writable library was accepted: $aclout" ;;
+    esac
+    exists "and nothing was written into it"   no  "$acldir/lib/unsplash/pic.png"
+    chmod -a "everyone allow add_file,delete_child" "$acldir/lib" 2>/dev/null
+    # A DENY ace restricts; it must NOT be mistaken for a grant.
+    denydir="$fixture/acl-deny"; mkdir -p "$denydir/lib"
+    printf 'x' >"$denydir/src.png"
+    chmod +a "everyone deny delete" "$denydir/lib" 2>/dev/null
+    denyout=$(python3 -c "$swapsrc" "$denydir/src.png" "$denydir/lib" unsplash pic png 2>&1)
+    chmod -a "everyone deny delete" "$denydir/lib" 2>/dev/null
+    case "$denyout" in
+    SAVED*) pass "a DENY ace is not mistaken for a write grant" ;;
+    *) fail "a benign deny-delete ACL blocked the save: $denyout" ;;
+    esac
+else
+    pass "ACL mutant skipped: this platform has no chmod +a"
+    pass "ACL deny-vs-allow mutant skipped: this platform has no chmod +a"
+fi
+
 # --- the contrast floor must actually be reached, on ANY background --------
 # The endpoint (white or black) was chosen by background LIGHTNESS, which is
 # the wrong test: on a mid-tone background the lighter side can be the weaker
@@ -627,10 +685,6 @@ exists "an ordinary provider folder still receives the download" yes "$okslib/un
 # blocked, which is precisely the check/use boundary.
 swapdir="$fixture/swap"; mkdir -p "$swapdir/lib/unsplash" "$swapdir/outside"
 swapfifo="$swapdir/src.fifo"; rm -f "$swapfifo"; mkfifo "$swapfifo"
-# The saver is the shipped helper, lifted out of the tool. An implementation
-# that has no such helper cannot bind a descriptor at all, so its absence is a
-# FAILURE of this control, not a reason to skip the case.
-swapsrc=$(sed -n "/^SAVE_PY='\$/,/^'\$/p" "$THEME" | sed '1d;$d')
 (
     # Give the saver time to reach its blocking read, then swap the NAME.
     # The write is backgrounded behind a timeout so a saver that never opens
