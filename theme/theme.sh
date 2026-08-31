@@ -666,8 +666,13 @@ cmd_unsplash_status() {
     # shape is checked rather than trusted. A non-numeric limit is a broken or
     # hostile answer, not a number to render.
     case "$limit" in '' | *[!0-9]*) die "Unsplash answered without usable rate-limit headers" ;; esac
-    case "$remaining" in *[!0-9]*) remaining="" ;; esac
-    printf 'requests left this hour:  %s/%s (resets on the hour)\n' "$remaining" "$limit"
+    # A window driven negative (overage) is a real answer — show it, with
+    # the recovery fact; anything else non-numeric is not a number to render.
+    case "${remaining#-}" in '' | *[!0-9]*) remaining="" ;; esac
+    case "$remaining" in
+    -*) printf 'requests left this hour:  %s/%s (window EXCEEDED — resets on the hour)\n' "$remaining" "$limit" ;;
+    *)  printf 'requests left this hour:  %s/%s (resets on the hour)\n' "$remaining" "$limit" ;;
+    esac
     case "$limit" in
     50) printf 'tier:                     demo (50/hour; production raises it to 5000)\n' ;;
     5000) printf 'tier:                     production (5000/hour)\n' ;;
