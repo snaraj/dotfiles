@@ -25,11 +25,10 @@ gitignored.
 - `config` — identity (public noreply), nvim editor, gh credential helper
 - signing stays per-command by design; no keys here
 
-**`wallpapers/` + `theme/`**
-- wallpaper library and the `theme` CLI (wallpaper + matching terminal
-  colors, Unsplash/Pinterest fetch) — full docs in
-  [`theme/README.md`](theme/README.md). `theme/` is self-contained,
-  ready to split into its own repository.
+**`wallpapers/`**
+- the wallpaper library (content, untracked — only the folder convention
+  lives in git). Managed by the `theme` CLI, which ships as a release
+  binary from [snaraj/theme](https://github.com/snaraj/theme).
 
 ## Tests
 
@@ -37,7 +36,6 @@ Each suite lives beside what it tests and runs straight from a checkout.
 
 | Suite | Run | Covers |
 | --- | --- | --- |
-| [`theme/theme-boundary-tests.sh`](theme/theme-boundary-tests.sh) | `bash theme/theme-boundary-tests.sh` | the `theme` CLI's destructive-command, network, credential and save-path boundaries |
 | [`zsh/completion-security-tests.zsh`](zsh/completion-security-tests.zsh) | `zsh zsh/completion-security-tests.zsh` | the `compinit` permission audit and its dump handling |
 | [`kitty/split-layout-tests/`](kitty/split-layout-tests/) | `python3 kitty/split-layout-tests/campaign.py --smoke` | window geometry across split / close / layout-cycle sequences, driven through a private kitty |
 | [`kitty/text-integrity-tests.sh`](kitty/text-integrity-tests.sh) | `zsh kitty/text-integrity-tests.sh` | typing, wrapping, unicode and the paste guard, asserted against the real screen buffer |
@@ -50,13 +48,12 @@ close it again; they never touch the terminal you are sitting in.
 ```sh
 git clone https://github.com/snaraj/dotfiles.git ~/.config
 cp ~/.config/zsh/zshenv ~/.zshenv
-brew install kitty starship neovim eza kubernetes-cli helm wallpaper pipx imagemagick
-pipx install pywal
+brew install kitty starship neovim eza kubernetes-cli helm wallpaper
 mkdir -p ~/.config/zsh/plugins && cd ~/.config/zsh/plugins
 git clone https://github.com/zsh-users/zsh-autosuggestions
 git clone https://github.com/zsh-users/zsh-syntax-highlighting
 git clone https://github.com/zsh-users/zsh-history-substring-search
-mkdir -p ~/.local/bin && ln -s ~/.config/theme/theme.sh ~/.local/bin/theme
+# theme CLI: prebuilt binary — https://github.com/snaraj/theme#install
 exec zsh
 ```
 
@@ -68,11 +65,13 @@ Single item instead: take just its folder plus the matching lines of
 Same clone + zshenv + plugins as above, then:
 
 ```sh
-sudo apt install zsh kitty neovim eza curl python3-pip pipx imagemagick
+sudo apt install zsh kitty neovim eza curl
 curl -sS https://starship.rs/install.sh | sh
-pipx install pywal
 chsh -s "$(which zsh)"
 ```
+
+The `theme` CLI installs the same way as on macOS (Linux binaries on the
+[releases page](https://github.com/snaraj/theme/releases)).
 
 Skip `brew`'s env lines in `~/.zshenv` (guard: they no-op if `/opt/homebrew`
 is absent — or delete them). `wallpaper` is macOS-only; `theme` falls back
