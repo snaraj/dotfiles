@@ -25,7 +25,7 @@ ZSH_AUTOSUGGEST_ACCEPT_WIDGETS=(forward-char vi-forward-char)
 ZSH_AUTOSUGGEST_PARTIAL_ACCEPT_WIDGETS=()
 source $ZDOTDIR/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
 
-# pipx-installed tools (pywal) and the theme command
+# local binaries (the theme CLI installs here)
 export PATH="$HOME/.local/bin:$PATH"
 
 # starship prompt — init script cached (was `eval "$(starship init zsh)"`, a
@@ -65,3 +65,4 @@ bindkey -M emacs '^[[1;5D' backward-word       # ctrl+left
 bindkey -M emacs '^[[1;5C' forward-word        # ctrl+right
 # Word-jumps stop at path separators instead of leaping whole paths
 WORDCHARS=${WORDCHARS//\//}
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
