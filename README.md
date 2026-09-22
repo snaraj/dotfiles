@@ -14,6 +14,9 @@ gitignored.
 **`kitty/`**
 - `kitty.conf` + font/cursor/layout fragments; paste-guard enabled
 - colors come from `current-theme.conf`, managed by the `theme` CLI
+- `kitty-font.conf` currently selects MonoLisaCode Trial at 16 pt. Install your
+  own copy of that font before launching Kitty, or select an installed font in
+  that file and adjust its `modify_font` values. Font files are not in this repo.
 - `split_dir.py` — directional-split kitten that rebuilds the splits tree
   instead of equalizing it
 

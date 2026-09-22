@@ -8,7 +8,7 @@ export STARSHIP_CONFIG=$CONFIG_DIR/starship/starship.toml
 export THEME_WALLPAPER_DIR=$CONFIG_DIR/wallpapers
 
 # text contrast
-export THEME_CONTRAST=4.5
+export THEME_CONTRAST=7
 
 # Firefox CSS config file
 export FIREFOX_USER_CHROME="/Users/samuel/Library/Application Support/Firefox/Profiles/wldjcvt7.default-release-1/chrome"
