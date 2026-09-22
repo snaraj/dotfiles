@@ -6,6 +6,7 @@ zsh/pac-variables.zsh
 
 # zsh runtime metadata
 zsh/.zcompdump*
+zsh/.zcompaudit-clean
 zsh/.zsh_history
 zsh/.zsh_sessions
 # the whole directory, not just its contents: each plugin is its own clone,

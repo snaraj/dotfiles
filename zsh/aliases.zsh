@@ -18,3 +18,12 @@ alias lt='eza -aT --color=always --icons=always'
 if [[ -n "${KITTY_WINDOW_ID:-}" ]] && (( $+commands[kitten] )); then
     alias ssh='kitten ssh'
 fi
+
+# Clear Kitty's screen and scrollback without touching shell command history.
+clear() {
+    if (( $# == 0 )) && [[ ${TERM:-} == xterm-kitty ]]; then
+        builtin printf '\033[H\033[2J\033[3J'
+    else
+        command clear "$@"
+    fi
+}

@@ -1,6 +1,11 @@
 add_newline = false
 format = "$all"
 
+# Single-line prompt: keep $all but drop the line_break module, which would
+# otherwise push the prompt character onto a second line.
+[line_break]
+disabled = true
+
 # Change prompt logo
 [character]
 success_symbol = "[🗡️](bold green)"
