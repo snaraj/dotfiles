@@ -4,6 +4,9 @@
 # work related items
 zsh/pac-variables.zsh
 
+# machine-only shell settings, sourced by zsh/variables.zsh when present
+zsh/local.zsh
+
 # zsh runtime metadata
 zsh/.zcompdump*
 zsh/.zcompaudit-clean
