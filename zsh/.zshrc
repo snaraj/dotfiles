@@ -7,8 +7,10 @@ source $ZDOTDIR/variables.zsh
 # Use emacs-style line editing (EDITOR=nvim would otherwise switch zsh into vi mode)
 bindkey -e
 
-# History behavior: write each command as it runs, drop duplicates
-setopt INC_APPEND_HISTORY HIST_IGNORE_ALL_DUPS
+# History behavior: write each command as it runs, drop duplicates, squeeze
+# extra blanks, and never record a command typed with a leading space (the way
+# to run one that carries a secret).
+setopt INC_APPEND_HISTORY HIST_IGNORE_ALL_DUPS HIST_REDUCE_BLANKS HIST_IGNORE_SPACE
 
 # Completion cache + the once-a-day compinit security audit. Its own file so
 # zsh/completion-security-tests.zsh can exercise the shipped code directly.
@@ -26,6 +28,7 @@ ZSH_AUTOSUGGEST_PARTIAL_ACCEPT_WIDGETS=()
 source $ZDOTDIR/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
 
 # local binaries (the theme CLI installs here)
+# Deliberately first: anything that can write here shadows system commands (fine on a single-user laptop).
 export PATH="$HOME/.local/bin:$PATH"
 
 # starship prompt — init script cached (was `eval "$(starship init zsh)"`, a
@@ -41,7 +44,7 @@ source $ZDOTDIR/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
 # History Substring Search — UP/DOWN cycle through history entries containing
 # what you typed. Loaded last per its README; duplicates are skipped so a
-# history full of repeated `ssh pie5` lines doesn't look like a stuck cycle.
+# history full of one repeated ssh login doesn't look like a stuck cycle.
 source $ZDOTDIR/plugins/zsh-history-substring-search/zsh-history-substring-search.zsh
 HISTORY_SUBSTRING_SEARCH_ENSURE_UNIQUE=1
 # Bind BOTH arrow encodings: CSI (^[[A) and application-mode SS3 (^[OA) —
